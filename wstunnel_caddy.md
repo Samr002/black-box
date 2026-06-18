@@ -1,13 +1,24 @@
 # WStunnel Setup Guide
 
-Setup WebSocket tunnels between Server VPS and Client VPS. Uses example domain `tunnel.yourdomain.com`.
+Setup WebSocket tunnels between Iran VPS (server) and Foreign VPS (client). Domain `tunnel.yourdomain.com` must point to Iran VPS IP.
 
 ## Prerequisites
 
-- Two VPS instances: Server and Client
-- Domain with SSL certificate (tunnel.yourdomain.com)
-- Caddy installed and running
-- Root or sudo access
+- Iran VPS (server)
+- Foreign VPS (client)
+- Domain with SSL certificate (tunnel.yourdomain.com) pointing to Iran VPS IP
+- Caddy installed on Iran VPS
+- Root or sudo access on both
+
+## DNS Setup
+
+Point your domain to Iran VPS IP:
+
+```
+tunnel.yourdomain.com  A  <IRAN_VPS_IP>
+```
+
+Replace `<IRAN_VPS_IP>` with your Iran VPS public IP address. Wait for DNS propagation before proceeding.
 
 ## Installation
 
@@ -22,7 +33,7 @@ sudo chmod +x /usr/local/bin/wstunnel
 wstunnel --version
 ```
 
-## Server VPS Setup
+## Iran VPS Setup (Server)
 
 ### 1. Create systemd service
 
@@ -83,7 +94,7 @@ Reload Caddy:
 sudo systemctl reload caddy
 ```
 
-## Client VPS Setup
+## Foreign VPS Setup (Client)
 
 ### 1. Create systemd service
 
@@ -141,19 +152,19 @@ sudo systemctl status wstunnel-client.service
 
 ### View logs
 
-Server VPS:
+Iran VPS:
 ```bash
 sudo journalctl -u wstunnel-server.service -f
 ```
 
-Client VPS:
+Foreign VPS:
 ```bash
 sudo journalctl -u wstunnel-client.service -f
 ```
 
 ### Test connectivity
 
-From Client VPS, verify port 8443 is open:
+From Foreign VPS, verify port 8443 is open:
 ```bash
 ss -tlnp | grep 8443
 ```
@@ -165,9 +176,9 @@ LISTEN 0 128 0.0.0.0:8443 0.0.0.0:*
 
 ## Tunnel Usage
 
-Once running, traffic sent to Client VPS port 8443 will tunnel through Caddy on Server VPS to localhost:2018.
+Once running, traffic sent to Foreign VPS port 8443 will tunnel through Caddy on Iran VPS to localhost:2018.
 
-Connect via Client VPS:
+Connect via Foreign VPS:
 ```bash
 curl -k https://localhost:8443
 ```
@@ -176,9 +187,9 @@ curl -k https://localhost:8443
 
 ### Connection refused on client
 
-- Verify Caddy is running on Server VPS: `sudo systemctl status caddy`
+- Verify Caddy is running on Iran VPS: `sudo systemctl status caddy`
 - Check Caddy config: `sudo caddy validate --config /etc/caddy/Caddyfile`
-- Verify domain resolves: `nslookup tunnel.yourdomain.com`
+- Verify domain resolves to Iran VPS IP: `nslookup tunnel.yourdomain.com`
 
 ### Client fails to start
 
@@ -188,7 +199,7 @@ curl -k https://localhost:8443
 ### High latency
 
 - Verify network path: `mtr tunnel.yourdomain.com`
-- Check Server VPS resources: `top`, `free -h`
+- Check Iran VPS resources: `top`, `free -h`
 
 ### Port already in use
 
