@@ -1215,30 +1215,77 @@ flow_uninstall() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    local bin user_exists=false
-    bin=$(wstunnel_bin)
-    local binary_exists=false
-    [ -n "$bin" ] && binary_exists=true
-    id "wstunnel" &>/dev/null && user_exists=true
+    # ── wstunnel detection ──────────────────────
+    local wbin; wbin=$(wstunnel_bin)
+    local wstunnel_bin_exists=false; [ -n "$wbin" ] && wstunnel_bin_exists=true
+    local wstunnel_user_exists=false; id "wstunnel" &>/dev/null && wstunnel_user_exists=true
 
-    if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $binary_exists && ! $user_exists; then
+    # Detect if this is an Iran VPS (server) install
+    local has_server=false
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        [[ "$svc" == *server* ]] && has_server=true
+    done
+
+    # Read server config NOW (before service files are deleted)
+    local saved_bind_port="2018"
+    if $has_server; then
+        parse_server_service
+        saved_bind_port="${PARSED_BIND_PORT:-2018}"
+    fi
+
+    # ── Caddy detection ─────────────────────────
+    # Binary-install marker : /usr/local/bin/caddy + /etc/systemd/system/caddy.service (we wrote both)
+    # Apt-install marker    : /etc/apt/sources.list.d/caddy-stable.list (we added this)
+    # Pre-existing Caddy    : caddy binary present but none of our markers
+    local caddy_ours_binary=false caddy_ours_apt=false caddy_preexisting=false
+    if $has_server; then
+        if [ -x "/usr/local/bin/caddy" ] && [ -f "/etc/systemd/system/caddy.service" ]; then
+            caddy_ours_binary=true
+        elif [ -f "/etc/apt/sources.list.d/caddy-stable.list" ]; then
+            caddy_ours_apt=true
+        elif [ -n "$(caddy_bin)" ]; then
+            caddy_preexisting=true
+        fi
+    fi
+
+    # ── Nothing to do? ──────────────────────────
+    if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $wstunnel_bin_exists && ! $wstunnel_user_exists \
+        && ! $caddy_ours_binary && ! $caddy_ours_apt; then
         info "Nothing to remove — wstunnel is not installed on this machine."; exit 0
     fi
 
+    # ── Preview ─────────────────────────────────
     echo -e "${BOLD}─── Will be removed ───────────────────────────────────${RESET}"
     echo ""
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
         local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
-        echo -e "  ${CYAN}service${RESET}  /etc/systemd/system/${svc}  [${st}]"
+        echo -e "  ${CYAN}wstunnel service${RESET}  /etc/systemd/system/${svc}  [${st}]"
     done
-    $binary_exists && echo -e "  ${CYAN}binary${RESET}   ${bin}"
-    $user_exists   && echo -e "  ${CYAN}user${RESET}     wstunnel  +  /home/wstunnel/"
+    $wstunnel_bin_exists  && echo -e "  ${CYAN}wstunnel binary${RESET}   ${wbin}"
+    $wstunnel_user_exists && echo -e "  ${CYAN}wstunnel user${RESET}     wstunnel  +  /home/wstunnel/"
+
+    if $caddy_ours_binary; then
+        local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
+        echo -e "  ${CYAN}Caddy service${RESET}     /etc/systemd/system/caddy.service  [${cst}]"
+        echo -e "  ${CYAN}Caddy binary${RESET}      /usr/local/bin/caddy"
+        echo -e "  ${CYAN}Caddy user${RESET}        caddy  +  /var/lib/caddy/  /var/log/caddy/"
+        echo -e "  ${CYAN}Caddy config${RESET}      /etc/caddy/"
+    elif $caddy_ours_apt; then
+        local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
+        echo -e "  ${CYAN}Caddy package${RESET}     caddy (apt remove --purge)  [${cst}]"
+        echo -e "  ${CYAN}Caddy config${RESET}      /etc/caddy/"
+        echo -e "  ${CYAN}Caddy apt repo${RESET}    /etc/apt/sources.list.d/caddy-stable.list"
+        echo -e "  ${CYAN}              ${RESET}    /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
+    elif $caddy_preexisting; then
+        echo -e "  ${YELLOW}Caddy pre-existed — only our reverse_proxy block will be removed from Caddyfile${RESET}"
+    fi
     echo ""
     echo -e "  ${RED}All items above will be permanently removed.${RESET}"
     echo ""
     confirm "Are you sure?" || { info "Aborted."; exit 0; }
     echo ""
 
+    # ── 1. wstunnel services ────────────────────
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
         info "Stopping and disabling ${svc} ..."
         systemctl stop    "$svc" 2>/dev/null || true
@@ -1246,22 +1293,98 @@ flow_uninstall() {
         rm -f "/etc/systemd/system/${svc}"
         success "Removed /etc/systemd/system/${svc}"
     done
-    if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
-        systemctl daemon-reload
-        systemctl reset-failed 2>/dev/null || true
+
+    # ── 2. Caddy ────────────────────────────────
+    if $caddy_ours_binary; then
+        info "Removing Caddy (binary install)..."
+        systemctl stop    caddy 2>/dev/null || true
+        systemctl disable caddy 2>/dev/null || true
+        rm -f /etc/systemd/system/caddy.service
+        rm -f /usr/local/bin/caddy
+        rm -rf /etc/caddy /var/lib/caddy /var/log/caddy
+        if id caddy &>/dev/null; then
+            userdel caddy 2>/dev/null || true
+        fi
+        if getent group caddy &>/dev/null; then
+            groupdel caddy 2>/dev/null || true
+        fi
+        # Clean up any leftover apt repo files from failed apt attempt
+        rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+              /etc/apt/sources.list.d/caddy-stable.list
+        success "Caddy removed completely."
+
+    elif $caddy_ours_apt; then
+        info "Removing Caddy (apt)..."
+        apt-get remove --purge -y caddy 2>/dev/null || true
+        apt-get autoremove -y 2>/dev/null || true
+        rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+              /etc/apt/sources.list.d/caddy-stable.list
+        rm -rf /etc/caddy
+        success "Caddy removed via apt."
+
+    elif $caddy_preexisting; then
+        # Caddy was pre-existing — only remove the block we added to Caddyfile
+        info "Removing our domain block from Caddyfile..."
+        local caddyfile="/etc/caddy/Caddyfile"
+        if [ -f "$caddyfile" ]; then
+            python3 - "$caddyfile" "$saved_bind_port" <<'PYEOF'
+import sys
+path, port = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.read().split('\n')
+result = []
+i = 0
+while i < len(lines):
+    # detect start of a top-level block
+    if lines[i] and lines[i][0] not in (' ', '\t', '#', '}') and '{' in lines[i]:
+        block = [lines[i]]
+        depth = lines[i].count('{') - lines[i].count('}')
+        i += 1
+        while i < len(lines) and depth > 0:
+            depth += lines[i].count('{') - lines[i].count('}')
+            block.append(lines[i])
+            i += 1
+        # skip block if it contains our reverse_proxy line
+        if any(f'reverse_proxy localhost:{port}' in ln for ln in block):
+            pass
+        else:
+            result.extend(block)
+    else:
+        result.append(lines[i])
+        i += 1
+output = '\n'.join(result).strip()
+with open(path, 'w') as f:
+    f.write(output + '\n' if output else '')
+PYEOF
+            local cbin; cbin=$(caddy_bin)
+            if [ -n "$cbin" ]; then
+                systemctl reload caddy 2>/dev/null || true
+                success "Domain block removed; Caddy reloaded."
+            else
+                success "Domain block removed from Caddyfile."
+            fi
+        fi
     fi
 
-    if $binary_exists; then
-        rm -f "$bin"
-        success "Removed ${bin}"
+    # ── 3. systemctl reload ─────────────────────
+    systemctl daemon-reload
+    systemctl reset-failed 2>/dev/null || true
+
+    # ── 4. wstunnel binary ──────────────────────
+    if $wstunnel_bin_exists; then
+        rm -f "$wbin"
+        success "Removed ${wbin}"
     fi
-    if $user_exists; then
+
+    # ── 5. wstunnel user ────────────────────────
+    if $wstunnel_user_exists; then
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
         success "Removed user 'wstunnel' and /home/wstunnel/"
     fi
+
     echo ""
-    success "wstunnel has been completely removed from this machine."
+    success "wstunnel and all related components removed from this machine."
 }
 
 # ─────────────────────────────────────────────
