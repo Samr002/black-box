@@ -562,12 +562,25 @@ diagnose_server() {
         check_warn "No firewall tool detected (ufw/iptables)"
     fi
 
-    # 8. Recent logs
+    # 8. بررسی لاگ برای خطاهای رایج
+    local recent_logs
+    recent_logs=$(journalctl -u wstunnel-server.service -n 30 --no-pager 2>/dev/null || true)
+
+    if echo "$recent_logs" | grep -q "Rejecting connection with not allowed destination"; then
+        check_fail "wstunnel is REJECTING reverse tunnel connections!"
+        echo -e "         ${RED}--restrict-to flag is blocking ReverseTcp — it only allows forward Tcp.${RESET}"
+        echo -e "         ${YELLOW}→ Fix: remove --restrict-to from the service file:${RESET}"
+        echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
+        echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
+    fi
+
+    if echo "$recent_logs" | grep -q "Invalid protocol version"; then
+        check_warn "Some non-WebSocket clients are connecting (normal — browsers/scanners)"
+    fi
+
     echo ""
     echo -e "  ${BOLD}Last 15 log lines:${RESET}"
-    journalctl -u wstunnel-server.service -n 15 --no-pager 2>/dev/null \
-        | sed 's/^/    /' \
-        || echo -e "    ${YELLOW}(no logs available)${RESET}"
+    echo "$recent_logs" | tail -15 | sed 's/^/    /'
 
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
