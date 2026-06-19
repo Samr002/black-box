@@ -32,7 +32,6 @@ declare -a PARSED_FLAGS=()
 PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
 PARSED_UPGRADE_PATH=""
-declare -a PARSED_RESTRICT_TO=()
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -331,7 +330,7 @@ parse_client_service() {
 parse_server_service() {
     local svc_file="/etc/systemd/system/wstunnel-server.service"
     PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018"
-    PARSED_UPGRADE_PATH="" PARSED_RESTRICT_TO=()
+    PARSED_UPGRADE_PATH=""
     if [ ! -f "$svc_file" ]; then
         warn "Server service file not found — using default values for diagnostics"
         return
@@ -341,11 +340,10 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    # استخراج secret path و restrict-to
+    # استخراج secret path
     local prev=""
     for tok in $exec_line; do
         [ "$prev" = "--restrict-http-upgrade-path-prefix" ] && PARSED_UPGRADE_PATH="$tok"
-        [ "$prev" = "--restrict-to" ] && PARSED_RESTRICT_TO+=("$tok")
         prev="$tok"
     done
 }
@@ -433,9 +431,6 @@ write_server_service() {
     if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
         exec_flags+=" --restrict-http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
     fi
-    for r in "${PARSED_RESTRICT_TO[@]+"${PARSED_RESTRICT_TO[@]}"}"; do
-        exec_flags+=" --restrict-to ${r}"
-    done
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -521,11 +516,30 @@ diagnose_server() {
     cbin=$(caddy_bin)
     if [ -n "$cbin" ]; then
         check_ok "Caddy binary found: [$cbin]"
-        if "$cbin" validate --config /etc/caddy/Caddyfile &>/dev/null 2>&1; then
+        local caddyfile="/etc/caddy/Caddyfile"
+        if "$cbin" validate --config "$caddyfile" &>/dev/null 2>&1; then
             check_ok "Caddyfile is valid"
         else
-            check_fail "Caddyfile has errors"
-            echo -e "         ${YELLOW}→ $cbin validate --config /etc/caddy/Caddyfile${RESET}"
+            check_fail "Caddyfile has errors — run: $cbin validate --config $caddyfile"
+        fi
+        # بررسی محتوای Caddyfile
+        if [ -f "$caddyfile" ]; then
+            if grep -q "respond 404" "$caddyfile" 2>/dev/null; then
+                check_fail "Caddyfile has 'respond 404' — this blocks all wstunnel connections!"
+                echo -e "         ${RED}Fix on Iran VPS:${RESET}"
+                echo -e "         ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
+                echo -e "         ${CYAN}<your-domain> {${RESET}"
+                echo -e "         ${CYAN}    header -Server${RESET}"
+                echo -e "         ${CYAN}    reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
+                echo -e "         ${CYAN}}${RESET}"
+                echo -e "         ${CYAN}EOF${RESET}"
+                echo -e "         ${CYAN}systemctl reload caddy${RESET}"
+            elif grep -q "reverse_proxy localhost:${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
+                check_ok "Caddyfile correctly proxies to localhost:${PARSED_BIND_PORT}"
+            else
+                check_warn "Caddyfile may not proxy to localhost:${PARSED_BIND_PORT}"
+                echo -e "         ${YELLOW}→ cat /etc/caddy/Caddyfile${RESET}"
+            fi
         fi
     else
         check_fail "Caddy is NOT installed"
@@ -570,10 +584,11 @@ diagnose_client() {
     echo ""
 
     # 1. Binary
-    if command -v wstunnel &>/dev/null; then
-        check_ok "wstunnel binary: $(wstunnel --version 2>&1 | head -n1)"
+    local wbin; wbin=$(wstunnel_bin)
+    if [ -n "$wbin" ]; then
+        check_ok "wstunnel binary: $("$wbin" --version 2>&1 | head -n1)  [$wbin]"
     else
-        check_fail "wstunnel binary not found at /usr/local/bin/wstunnel"
+        check_fail "wstunnel binary not found (checked /usr/local/bin and /usr/bin)"
     fi
 
     # 2. Service running
@@ -595,17 +610,35 @@ diagnose_client() {
     fi
 
     # 4. HTTPS reachability to Iran VPS
-    local http_code
+    local http_code caddy_broken=false
     http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
         --max-time 6 \
         "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null || echo "000")
-    if [ "$http_code" != "000" ]; then
-        check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
+    case "$http_code" in
+        "000")
+            check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (timeout/refused)"
+            echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
+            echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
+            echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            ;;
+        "404")
+            check_fail "Iran VPS returns 404 — Caddyfile is misconfigured or has 'respond 404'"
+            echo -e "         ${RED}Caddy is running but blocking WebSocket connections!${RESET}"
+            echo -e "         ${YELLOW}→ On Iran VPS fix Caddyfile:${RESET}"
+            echo -e "         ${CYAN}           reverse_proxy localhost:2018  (remove @ws and respond 404)${RESET}"
+            echo -e "         ${YELLOW}→ Then: systemctl reload caddy${RESET}"
+            caddy_broken=true
+            ;;
+        *)
+            check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
+            ;;
+    esac
+
+    # نمایش secret path کلاینت
+    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
+        check_ok "Secret path configured: ${PARSED_UPGRADE_PATH}"
     else
-        check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (timeout/refused)"
-        echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
-        echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
-        echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+        check_warn "No secret path configured (Iran VPS must also have no path restriction)"
     fi
 
     # 5. VPN service listening check (local side — traffic arrives here via -R)
@@ -667,7 +700,19 @@ diagnose_client() {
     # 8. Summary verdict
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━  Verdict  ━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    if $any_missing; then
+    if $caddy_broken; then
+        echo -e "  ${RED}Root cause: Caddyfile on Iran VPS is returning 404.${RESET}"
+        echo -e "  wstunnel cannot connect because Caddy rejects all requests."
+        echo ""
+        echo -e "  ${YELLOW}Fix on Iran VPS — run these commands:${RESET}"
+        echo -e "  ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
+        echo -e "  ${CYAN}<your-domain> {${RESET}"
+        echo -e "  ${CYAN}    header -Server${RESET}"
+        echo -e "  ${CYAN}    reverse_proxy localhost:2018${RESET}"
+        echo -e "  ${CYAN}}${RESET}"
+        echo -e "  ${CYAN}EOF${RESET}"
+        echo -e "  ${CYAN}systemctl reload caddy${RESET}"
+    elif $any_missing; then
         echo -e "  ${RED}Most likely cause: VPN service not running on this Foreign VPS.${RESET}"
         echo -e "  The wstunnel tunnel may be working fine, but there is nothing"
         echo -e "  listening on the destination port to accept the forwarded traffic."
@@ -748,19 +793,6 @@ flow_server() {
     [ "${PARSED_UPGRADE_PATH}" = "none" ] && PARSED_UPGRADE_PATH=""
 
     echo ""
-    echo -e "  ${YELLOW}Restrict tunnels:${RESET} only allow specified ports (prevents open-proxy abuse)."
-    echo -e "  Enter comma-separated ports or ${CYAN}'none'${RESET} to allow all (not recommended)."
-    ask RESTRICT_PORTS_INPUT "Allowed tunnel ports on Iran VPS (e.g. 8443,1080)" "8443"
-    PARSED_RESTRICT_TO=()
-    if [ "${RESTRICT_PORTS_INPUT}" != "none" ]; then
-        IFS=',' read -ra _rp <<< "${RESTRICT_PORTS_INPUT}"
-        for _p in "${_rp[@]}"; do
-            _p=$(echo "$_p" | tr -d ' ')
-            [ -n "$_p" ] && PARSED_RESTRICT_TO+=("0.0.0.0:${_p}")
-        done
-    fi
-
-    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Mode             :  ${GREEN}Iran VPS — Server${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
@@ -768,7 +800,6 @@ flow_server() {
     echo -e "  Caddy domain     :  ${YELLOW}${DOMAIN}${RESET}"
     echo -e "  Caddy proxies    :  ${CYAN}${DOMAIN}:443  →  localhost:${PARSED_BIND_PORT}${RESET}"
     echo -e "  Secret path      :  ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
-    echo -e "  Restrict to      :  ${YELLOW}${PARSED_RESTRICT_TO[*]:-"(unrestricted)"}${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
@@ -902,18 +933,14 @@ flow_client() {
 # ─────────────────────────────────────────────
 edit_server() {
     parse_server_service
-    local cur_ports=""
-    for r in "${PARSED_RESTRICT_TO[@]+"${PARSED_RESTRICT_TO[@]}"}"; do
-        local _p="${r##*:}"; cur_ports+="${_p},"; done
-    cur_ports="${cur_ports%,}"
 
     echo ""
     echo -e "${BOLD}─── Current Server Configuration ─────────────────────${RESET}"
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo -e "  ${BOLD}Secret path      :${RESET}  ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
-    echo -e "  ${BOLD}Restrict to      :${RESET}  ${YELLOW}${cur_ports:-"(unrestricted)"}${RESET}"
     echo ""
 
+    local old_port="${PARSED_BIND_PORT}"
     ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
     ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
 
@@ -922,33 +949,21 @@ edit_server() {
     ask NEW_UPGRADE_PATH "Secret WebSocket path" "${PARSED_UPGRADE_PATH:-none}"
     [ "${NEW_UPGRADE_PATH}" = "none" ] && NEW_UPGRADE_PATH=""
 
-    echo ""
-    echo -e "  Comma-separated ports, or ${CYAN}'none'${RESET} to allow all."
-    ask NEW_RESTRICT "Allowed tunnel ports (e.g. 8443,1080)" "${cur_ports:-none}"
-
     PARSED_BIND_IP="${NEW_BIND_IP}"
     PARSED_BIND_PORT="${NEW_BIND_PORT}"
     PARSED_UPGRADE_PATH="${NEW_UPGRADE_PATH}"
-    PARSED_RESTRICT_TO=()
-    if [ "${NEW_RESTRICT}" != "none" ] && [ -n "${NEW_RESTRICT}" ]; then
-        IFS=',' read -ra _rp <<< "${NEW_RESTRICT}"
-        for _p in "${_rp[@]}"; do
-            _p=$(echo "$_p" | tr -d ' ')
-            [ -n "$_p" ] && PARSED_RESTRICT_TO+=("0.0.0.0:${_p}")
-        done
-    fi
 
     echo ""
     echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
     echo -e "  wstunnel listens :  ${CYAN}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo -e "  Secret path      :  ${CYAN}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
-    echo -e "  Restrict to      :  ${CYAN}${PARSED_RESTRICT_TO[*]:-"(unrestricted)"}${RESET}"
     echo ""
     confirm "Apply and restart service?" || { info "Cancelled."; return; }
     echo ""
     write_server_service
-    if [ "${NEW_BIND_PORT}" != "2018" ]; then
-        warn "Port changed — update your Caddyfile: reverse_proxy localhost:${PARSED_BIND_PORT}"
+    if [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
+        warn "Bind port changed from ${old_port} to ${PARSED_BIND_PORT}"
+        warn "Update Caddyfile manually: reverse_proxy localhost:${PARSED_BIND_PORT}"
         echo -e "  Then: ${CYAN}sudo systemctl reload caddy${RESET}"
     fi
 }
