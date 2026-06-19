@@ -89,9 +89,25 @@ check_root() {
 detect_services() {
     local -n _out=$1
     _out=()
+    # بررسی اسم‌های استاندارد
     for svc in wstunnel-server.service wstunnel-client.service; do
         [ -f "/etc/systemd/system/${svc}" ] && _out+=("$svc")
     done
+    # اگر هیچکدام پیدا نشد، هر فایل سرویس حاوی wstunnel را پیدا کن
+    if [ ${#_out[@]} -eq 0 ]; then
+        while IFS= read -r f; do
+            [ -f "$f" ] && _out+=("$(basename "$f")")
+        done < <(grep -rl "wstunnel" /etc/systemd/system/ 2>/dev/null | grep '\.service$' || true)
+    fi
+}
+
+# مسیر دقیق باینری wstunnel را برمی‌گرداند (حتی اگر در PATH نباشد)
+wstunnel_bin() {
+    if   [ -x "/usr/local/bin/wstunnel" ]; then echo "/usr/local/bin/wstunnel"
+    elif [ -x "/usr/bin/wstunnel" ];       then echo "/usr/bin/wstunnel"
+    elif command -v wstunnel &>/dev/null;  then command -v wstunnel
+    else echo ""
+    fi
 }
 
 install_wstunnel_binary() {
@@ -790,13 +806,31 @@ edit_client() {
 flow_edit() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
-    [ ${#FOUND_SVCS[@]} -eq 0 ] && error "No wstunnel services found. Install first (option 1 or 2)."
 
     local has_server=false has_client=false
-    for svc in "${FOUND_SVCS[@]}"; do
-        [[ "$svc" == "wstunnel-server.service" ]] && has_server=true
-        [[ "$svc" == "wstunnel-client.service" ]] && has_client=true
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        [[ "$svc" == *server* ]] && has_server=true
+        [[ "$svc" == *client* ]] && has_client=true
     done
+
+    # اگر سرویسی پیدا نشد، از کاربر بپرس
+    if ! $has_server && ! $has_client; then
+        echo ""
+        warn "No wstunnel service files found — which VPS is this?"
+        echo ""
+        echo -e "  ${CYAN}1${RESET}) Iran VPS    — server (bind IP / wstunnel port)"
+        echo -e "  ${CYAN}2${RESET}) Foreign VPS  — client (tunnel ports + domain)"
+        echo ""
+        local ch
+        while true; do
+            read -rp "$(echo -e "  ${BOLD}Enter 1 or 2${RESET}: ")" ch
+            case "$ch" in
+                1) edit_server; return ;;
+                2) edit_client; return ;;
+                *) warn "Please enter 1 or 2." ;;
+            esac
+        done
+    fi
 
     if $has_server && $has_client; then
         echo ""
@@ -824,20 +858,27 @@ flow_edit() {
 # ─────────────────────────────────────────────
 flow_update() {
     echo ""
-    command -v wstunnel &>/dev/null \
-        && info "Current version: $(wstunnel --version 2>&1 | head -n1)" \
-        || error "wstunnel is not installed. Use Install (option 1 or 2) first."
+    local bin
+    bin=$(wstunnel_bin)
+    if [ -n "$bin" ]; then
+        info "Current version: $("$bin" --version 2>&1 | head -n1)  [$bin]"
+    else
+        warn "wstunnel binary not found — will install fresh."
+    fi
 
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    [ ${#FOUND_SVCS[@]} -gt 0 ] && {
+    if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
         echo -e "  Services found:"
         for svc in "${FOUND_SVCS[@]}"; do
             local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
             echo -e "    ${CYAN}${svc}${RESET}  [${st}]"
         done
-    }
+    else
+        warn "No service files found — binary will be updated but no services to restart."
+    fi
+
     echo ""
     ask NEW_VERSION "Version to upgrade to" "10.5.5"
     echo ""
@@ -862,7 +903,7 @@ flow_update() {
         systemctl status "$svc" --no-pager
         echo ""
     done
-    success "Update complete: $(wstunnel --version 2>&1 | head -n1)"
+    success "Update complete: $(/usr/local/bin/wstunnel --version 2>&1 | head -n1)"
 }
 
 # ─────────────────────────────────────────────
@@ -873,12 +914,14 @@ flow_uninstall() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    local binary_exists=false user_exists=false
-    command -v wstunnel &>/dev/null && binary_exists=true
-    id "wstunnel" &>/dev/null        && user_exists=true
+    local bin user_exists=false
+    bin=$(wstunnel_bin)
+    local binary_exists=false
+    [ -n "$bin" ] && binary_exists=true
+    id "wstunnel" &>/dev/null && user_exists=true
 
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $binary_exists && ! $user_exists; then
-        info "Nothing to remove — wstunnel is not installed."; exit 0
+        info "Nothing to remove — wstunnel is not installed on this machine."; exit 0
     fi
 
     echo -e "${BOLD}─── Will be removed ───────────────────────────────────${RESET}"
@@ -887,7 +930,7 @@ flow_uninstall() {
         local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
         echo -e "  ${CYAN}service${RESET}  /etc/systemd/system/${svc}  [${st}]"
     done
-    $binary_exists && echo -e "  ${CYAN}binary${RESET}   /usr/local/bin/wstunnel"
+    $binary_exists && echo -e "  ${CYAN}binary${RESET}   ${bin}"
     $user_exists   && echo -e "  ${CYAN}user${RESET}     wstunnel  +  /home/wstunnel/"
     echo ""
     echo -e "  ${RED}All items above will be permanently removed.${RESET}"
@@ -900,11 +943,17 @@ flow_uninstall() {
         systemctl stop    "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}"
-        success "Removed ${svc}"
+        success "Removed /etc/systemd/system/${svc}"
     done
-    [ ${#FOUND_SVCS[@]} -gt 0 ] && { systemctl daemon-reload; systemctl reset-failed 2>/dev/null || true; }
+    if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
+        systemctl daemon-reload
+        systemctl reset-failed 2>/dev/null || true
+    fi
 
-    $binary_exists && { rm -f /usr/local/bin/wstunnel; success "Removed /usr/local/bin/wstunnel"; }
+    if $binary_exists; then
+        rm -f "$bin"
+        success "Removed ${bin}"
+    fi
     if $user_exists; then
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
