@@ -31,7 +31,6 @@ PARSED_WSS_PORT=""
 declare -a PARSED_FLAGS=()
 PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
-PARSED_UPGRADE_PATH=""
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -305,7 +304,7 @@ setup_user() {
 # ─────────────────────────────────────────────
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
-    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH=""
+    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=()
     if [ ! -f "$svc_file" ]; then
         warn "Client service file not found — some values will be empty"
         return
@@ -319,18 +318,11 @@ parse_client_service() {
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
     done < <(echo "$exec_line" | grep -oE 'tcp://[^[:space:]]+')
-    # استخراج secret path
-    local prev=""
-    for tok in $exec_line; do
-        [ "$prev" = "--http-upgrade-path-prefix" ] && PARSED_UPGRADE_PATH="$tok"
-        prev="$tok"
-    done
 }
 
 parse_server_service() {
     local svc_file="/etc/systemd/system/wstunnel-server.service"
     PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018"
-    PARSED_UPGRADE_PATH=""
     if [ ! -f "$svc_file" ]; then
         warn "Server service file not found — using default values for diagnostics"
         return
@@ -340,12 +332,6 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    # استخراج secret path
-    local prev=""
-    for tok in $exec_line; do
-        [ "$prev" = "--restrict-http-upgrade-path-prefix" ] && PARSED_UPGRADE_PATH="$tok"
-        prev="$tok"
-    done
 }
 
 # ─────────────────────────────────────────────
@@ -353,11 +339,6 @@ parse_server_service() {
 # ─────────────────────────────────────────────
 show_client_state() {
     echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${RESET}"
-    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
-        echo -e "  ${BOLD}Secret path     :${RESET}  ${YELLOW}${PARSED_UPGRADE_PATH}${RESET}"
-    else
-        echo -e "  ${BOLD}Secret path     :${RESET}  ${YELLOW}(none — not recommended)${RESET}"
-    fi
     echo ""
     echo -e "  ${BOLD}Port mappings:${RESET}"
     if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
@@ -379,9 +360,6 @@ build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 20"
     result+=" --connection-min-idle 3"
-    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
-        result+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
-    fi
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
@@ -426,11 +404,7 @@ EOF
 }
 
 write_server_service() {
-    # ساخت رشته flags به صورت پویا
     local exec_flags="--websocket-ping-frequency-sec 20"
-    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
-        exec_flags+=" --restrict-http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
-    fi
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -643,12 +617,12 @@ diagnose_client() {
             ;;
         "400")
             check_fail "Iran VPS returns 400 — wstunnel is rejecting the WebSocket upgrade"
-            echo -e "         ${RED}Most likely: --restrict-to flag on Iran VPS is blocking ReverseTcp${RESET}"
+            echo -e "         ${RED}Most likely: --restrict-to or --restrict-http-upgrade-path-prefix flag on Iran VPS${RESET}"
             echo -e "         ${YELLOW}→ On Iran VPS remove --restrict-to:${RESET}"
             echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
+            echo -e "         ${YELLOW}→ Also remove --restrict-http-upgrade-path-prefix if present:${RESET}"
+            echo -e "         ${CYAN}   sed -i 's/ --restrict-http-upgrade-path-prefix [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
             echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
-            echo -e "         ${YELLOW}→ Also check: secret path must match on both sides${RESET}"
-            echo -e "         ${YELLOW}   Client path: ${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
             wstunnel_rejecting=true
             ;;
         "404")
@@ -663,13 +637,6 @@ diagnose_client() {
             check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
             ;;
     esac
-
-    # نمایش secret path کلاینت
-    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
-        check_ok "Secret path configured: ${PARSED_UPGRADE_PATH}"
-    else
-        check_warn "No secret path configured (Iran VPS must also have no path restriction)"
-    fi
 
     # 5. VPN service listening check (local side — traffic arrives here via -R)
     echo ""
@@ -821,20 +788,12 @@ flow_server() {
     ask DOMAIN "Tunnel subdomain pointing to this Iran VPS (e.g. tunnel.example.com)" ""
 
     echo ""
-    echo -e "${BOLD}─── Security ──────────────────────────────────────────${RESET}"
-    echo -e "  ${YELLOW}Secret path:${RESET} hides WebSocket endpoint from scanners."
-    echo -e "  Enter ${CYAN}'none'${RESET} to disable (not recommended)."
-    ask PARSED_UPGRADE_PATH "Secret WebSocket path" "/wst-api"
-    [ "${PARSED_UPGRADE_PATH}" = "none" ] && PARSED_UPGRADE_PATH=""
-
-    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Mode             :  ${GREEN}Iran VPS — Server${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
     echo -e "  wstunnel listens :  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo -e "  Caddy domain     :  ${YELLOW}${DOMAIN}${RESET}"
     echo -e "  Caddy proxies    :  ${CYAN}${DOMAIN}:443  →  localhost:${PARSED_BIND_PORT}${RESET}"
-    echo -e "  Secret path      :  ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
@@ -887,13 +846,6 @@ flow_client() {
     ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
 
     echo ""
-    echo -e "${BOLD}─── Security ──────────────────────────────────────────${RESET}"
-    echo -e "  ${YELLOW}Must match the secret path configured on Iran VPS.${RESET}"
-    echo -e "  Enter ${CYAN}'none'${RESET} if Iran VPS has no secret path."
-    ask PARSED_UPGRADE_PATH "Secret WebSocket path" "/wst-api"
-    [ "${PARSED_UPGRADE_PATH}" = "none" ] && PARSED_UPGRADE_PATH=""
-
-    echo ""
     echo -e "${BOLD}─── Port mappings ─────────────────────────────────────${RESET}"
     echo -e "  How ${BOLD}-R${RESET} works:"
     echo -e "    [User] → ${YELLOW}Iran VPS${RESET}:IRAN_PORT  →  WSS tunnel  →  ${GREEN}this VPS${RESET}:LOCAL_PORT"
@@ -926,7 +878,6 @@ flow_client() {
     echo -e "  Mode             :  ${GREEN}Foreign VPS — Client${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
     echo -e "  Connect to Iran  :  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${RESET}"
-    echo -e "  Secret path      :  ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
     echo ""
     show_client_state
     echo ""
@@ -972,26 +923,18 @@ edit_server() {
     echo ""
     echo -e "${BOLD}─── Current Server Configuration ─────────────────────${RESET}"
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    echo -e "  ${BOLD}Secret path      :${RESET}  ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
     echo ""
 
     local old_port="${PARSED_BIND_PORT}"
     ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
     ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
 
-    echo ""
-    echo -e "  Enter ${CYAN}'none'${RESET} to disable secret path."
-    ask NEW_UPGRADE_PATH "Secret WebSocket path" "${PARSED_UPGRADE_PATH:-none}"
-    [ "${NEW_UPGRADE_PATH}" = "none" ] && NEW_UPGRADE_PATH=""
-
     PARSED_BIND_IP="${NEW_BIND_IP}"
     PARSED_BIND_PORT="${NEW_BIND_PORT}"
-    PARSED_UPGRADE_PATH="${NEW_UPGRADE_PATH}"
 
     echo ""
     echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
     echo -e "  wstunnel listens :  ${CYAN}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    echo -e "  Secret path      :  ${CYAN}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
     echo ""
     confirm "Apply and restart service?" || { info "Cancelled."; return; }
     echo ""
@@ -1020,13 +963,12 @@ edit_client() {
         echo -e "  ${CYAN}2${RESET}) Edit an existing port mapping"
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
-        echo -e "  ${CYAN}5${RESET}) Change secret WebSocket path"
-        echo -e "  ${CYAN}6${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}7${RESET}) Cancel (discard all changes)"
+        echo -e "  ${CYAN}5${RESET}) Apply changes and restart service"
+        echo -e "  ${CYAN}6${RESET}) Cancel (discard all changes)"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1102,19 +1044,6 @@ edit_client() {
                 fi
                 ;;
             5)
-                echo ""
-                echo -e "  Current: ${YELLOW}${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
-                echo -e "  Enter ${CYAN}'none'${RESET} to disable secret path."
-                ask NEW_PATH "Secret WebSocket path" "${PARSED_UPGRADE_PATH:-none}"
-                [ "${NEW_PATH}" = "none" ] && NEW_PATH=""
-                if [ "${NEW_PATH}" != "${PARSED_UPGRADE_PATH}" ]; then
-                    PARSED_UPGRADE_PATH="${NEW_PATH}"
-                    changed=true; success "Secret path updated."
-                else
-                    info "No changes."
-                fi
-                ;;
-            6)
                 ! $changed && { info "No changes to apply."; continue; }
                 echo ""
                 echo -e "${BOLD}─── New Configuration ────────────────────────────────${RESET}"
@@ -1127,10 +1056,10 @@ edit_client() {
                 write_client_service
                 return
                 ;;
-            7)
+            6)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 7." ;;
+                warn "Please enter a number between 1 and 6." ;;
         esac
     done
 }
