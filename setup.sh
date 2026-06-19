@@ -128,15 +128,76 @@ install_caddy() {
         return
     fi
 
-    info "Installing Caddy via apt..."
-    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-        | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
-    apt-get update -qq
-    apt-get install -y caddy
-    success "Caddy installed: $(caddy_bin && "$(caddy_bin)" version 2>&1 | head -n1)"
+    info "Installing Caddy..."
+    local caddy_ok=false
+
+    # روش اول: apt از مخزن رسمی Caddy
+    info "Trying apt (official Caddy repo)..."
+    if apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
+        && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+            | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
+        && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+            | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null \
+        && apt-get update -qq \
+        && apt-get install -y caddy; then
+        caddy_ok=true
+        success "Caddy installed via apt."
+    else
+        warn "apt install failed — trying binary download from GitHub..."
+    fi
+
+    # روش دوم: دانلود باینری از GitHub
+    if ! $caddy_ok; then
+        local arch; arch=$(uname -m)
+        case "$arch" in
+            x86_64)  arch="amd64" ;;
+            aarch64) arch="arm64" ;;
+            *) error "Unsupported architecture: $arch" ;;
+        esac
+        local ver="2.9.1"
+        local url="https://github.com/caddyserver/caddy/releases/download/v${ver}/caddy_${ver}_linux_${arch}.tar.gz"
+        info "Downloading Caddy v${ver}..."
+        cd /tmp
+        wget -q --show-progress "$url" -O caddy_dl.tar.gz || error "Failed to download Caddy: $url"
+        tar xzf caddy_dl.tar.gz caddy
+        mv -f caddy /usr/local/bin/caddy
+        chmod +x /usr/local/bin/caddy
+        rm -f caddy_dl.tar.gz
+
+        # ایجاد کاربر و دایرکتوری
+        getent group caddy &>/dev/null  || groupadd --system caddy
+        id caddy &>/dev/null || useradd --system --gid caddy \
+            --home-dir /var/lib/caddy --shell /usr/sbin/nologin caddy
+        mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+        chown caddy:caddy /var/lib/caddy /var/log/caddy
+
+        # نوشتن فایل سرویس systemd
+        cat > /etc/systemd/system/caddy.service <<'CADDY_SVC'
+[Unit]
+Description=Caddy
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+CADDY_SVC
+        systemctl daemon-reload
+        caddy_ok=true
+        success "Caddy binary installed: $(/usr/local/bin/caddy version 2>&1 | head -n1)"
+    fi
 }
 
 # نوشتن یا به‌روز‌رسانی بلاک دامنه در Caddyfile
