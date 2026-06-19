@@ -562,16 +562,23 @@ diagnose_server() {
         check_warn "No firewall tool detected (ufw/iptables)"
     fi
 
-    # 8. بررسی لاگ برای خطاهای رایج
+    # 8. بررسی مستقیم service file برای --restrict-to
+    local svc_file="/etc/systemd/system/wstunnel-server.service"
+    if [ -f "$svc_file" ] && grep -q -- '--restrict-to' "$svc_file"; then
+        check_fail "--restrict-to found in service file — this BLOCKS all reverse tunnel (-R) connections"
+        echo -e "         ${RED}wstunnel v10 --restrict-to only allows forward Tcp, not ReverseTcp.${RESET}"
+        echo -e "         ${YELLOW}→ Fix now:${RESET}"
+        echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' ${svc_file}${RESET}"
+        echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
+    fi
+
+    # 9. بررسی لاگ برای خطاهای رایج
     local recent_logs
     recent_logs=$(journalctl -u wstunnel-server.service -n 30 --no-pager 2>/dev/null || true)
 
     if echo "$recent_logs" | grep -q "Rejecting connection with not allowed destination"; then
-        check_fail "wstunnel is REJECTING reverse tunnel connections!"
-        echo -e "         ${RED}--restrict-to flag is blocking ReverseTcp — it only allows forward Tcp.${RESET}"
-        echo -e "         ${YELLOW}→ Fix: remove --restrict-to from the service file:${RESET}"
-        echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
-        echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
+        check_fail "Recent logs confirm: reverse tunnel connections are being REJECTED"
+        echo -e "         ${YELLOW}→ Run the fix above (remove --restrict-to) and restart service${RESET}"
     fi
 
     if echo "$recent_logs" | grep -q "Invalid protocol version"; then
@@ -623,7 +630,7 @@ diagnose_client() {
     fi
 
     # 4. HTTPS reachability to Iran VPS
-    local http_code caddy_broken=false
+    local http_code caddy_broken=false wstunnel_rejecting=false
     http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
         --max-time 6 \
         "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null || echo "000")
@@ -633,6 +640,16 @@ diagnose_client() {
             echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
             echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
             echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            ;;
+        "400")
+            check_fail "Iran VPS returns 400 — wstunnel is rejecting the WebSocket upgrade"
+            echo -e "         ${RED}Most likely: --restrict-to flag on Iran VPS is blocking ReverseTcp${RESET}"
+            echo -e "         ${YELLOW}→ On Iran VPS remove --restrict-to:${RESET}"
+            echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
+            echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
+            echo -e "         ${YELLOW}→ Also check: secret path must match on both sides${RESET}"
+            echo -e "         ${YELLOW}   Client path: ${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
+            wstunnel_rejecting=true
             ;;
         "404")
             check_fail "Iran VPS returns 404 — Caddyfile is misconfigured or has 'respond 404'"
@@ -717,14 +734,19 @@ diagnose_client() {
         echo -e "  ${RED}Root cause: Caddyfile on Iran VPS is returning 404.${RESET}"
         echo -e "  wstunnel cannot connect because Caddy rejects all requests."
         echo ""
-        echo -e "  ${YELLOW}Fix on Iran VPS — run these commands:${RESET}"
+        echo -e "  ${YELLOW}Fix on Iran VPS:${RESET}"
         echo -e "  ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
-        echo -e "  ${CYAN}<your-domain> {${RESET}"
-        echo -e "  ${CYAN}    header -Server${RESET}"
-        echo -e "  ${CYAN}    reverse_proxy localhost:2018${RESET}"
-        echo -e "  ${CYAN}}${RESET}"
+        echo -e "  ${CYAN}<your-domain> { header -Server; reverse_proxy localhost:2018 }${RESET}"
         echo -e "  ${CYAN}EOF${RESET}"
         echo -e "  ${CYAN}systemctl reload caddy${RESET}"
+    elif $wstunnel_rejecting; then
+        echo -e "  ${RED}Root cause: wstunnel server on Iran VPS returning HTTP 400.${RESET}"
+        echo -e "  The WebSocket handshake is being rejected — likely --restrict-to"
+        echo -e "  is blocking ReverseTcp connections."
+        echo ""
+        echo -e "  ${YELLOW}Fix on Iran VPS:${RESET}"
+        echo -e "  ${CYAN}sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
+        echo -e "  ${CYAN}systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
     elif $any_missing; then
         echo -e "  ${RED}Most likely cause: VPN service not running on this Foreign VPS.${RESET}"
         echo -e "  The wstunnel tunnel may be working fine, but there is nothing"
