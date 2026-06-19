@@ -314,6 +314,7 @@ parse_client_service() {
     wss_url=$(echo "$exec_line" | grep -oE 'wss://[^[:space:]]+')
     PARSED_DOMAIN=$(echo "$wss_url"   | sed 's|wss://||' | sed 's|:[0-9]*$||')
     PARSED_WSS_PORT=$(echo "$wss_url" | grep -oE '[0-9]+$')
+    [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443"
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
@@ -396,6 +397,7 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+    systemctl enable wstunnel-client.service
     systemctl restart wstunnel-client.service
     echo ""
     systemctl status wstunnel-client.service --no-pager
@@ -428,6 +430,7 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
+    systemctl enable wstunnel-server.service
     systemctl restart wstunnel-server.service
     echo ""
     systemctl status wstunnel-server.service --no-pager
@@ -925,9 +928,13 @@ edit_server() {
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo ""
 
-    local old_port="${PARSED_BIND_PORT}"
+    local old_ip="${PARSED_BIND_IP}" old_port="${PARSED_BIND_PORT}"
     ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
     ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
+
+    if [ "${NEW_BIND_IP}" = "${old_ip}" ] && [ "${NEW_BIND_PORT}" = "${old_port}" ]; then
+        info "No changes — service not restarted."; return
+    fi
 
     PARSED_BIND_IP="${NEW_BIND_IP}"
     PARSED_BIND_PORT="${NEW_BIND_PORT}"
@@ -939,10 +946,25 @@ edit_server() {
     confirm "Apply and restart service?" || { info "Cancelled."; return; }
     echo ""
     write_server_service
+
     if [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
-        warn "Bind port changed from ${old_port} to ${PARSED_BIND_PORT}"
-        warn "Update Caddyfile manually: reverse_proxy localhost:${PARSED_BIND_PORT}"
-        echo -e "  Then: ${CYAN}sudo systemctl reload caddy${RESET}"
+        echo ""
+        info "Bind port changed — updating Caddyfile automatically..."
+        local caddy_domain
+        caddy_domain=$(grep -m1 ' {$' /etc/caddy/Caddyfile 2>/dev/null | awk '{print $1}' || true)
+        if [ -n "$caddy_domain" ]; then
+            configure_caddyfile "$caddy_domain" "${PARSED_BIND_PORT}"
+            local cbin; cbin=$(caddy_bin)
+            if [ -n "$cbin" ]; then
+                systemctl reload caddy && success "Caddy reloaded with new port."
+            else
+                warn "Caddy binary not found — reload manually: systemctl reload caddy"
+            fi
+        else
+            warn "Could not read domain from /etc/caddy/Caddyfile — update manually:"
+            echo -e "  Edit Caddyfile: ${CYAN}reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
+            echo -e "  Then: ${CYAN}systemctl reload caddy${RESET}"
+        fi
     fi
 }
 
@@ -1045,6 +1067,10 @@ edit_client() {
                 ;;
             5)
                 ! $changed && { info "No changes to apply."; continue; }
+                if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
+                    warn "No port mappings configured — wstunnel will start with no -R flags."
+                    confirm "Apply anyway?" || continue
+                fi
                 echo ""
                 echo -e "${BOLD}─── New Configuration ────────────────────────────────${RESET}"
                 show_client_state
@@ -1054,6 +1080,17 @@ edit_client() {
                 confirm "Apply and restart service?" || continue
                 echo ""
                 write_client_service
+                if [ ${#PARSED_FLAGS[@]} -gt 0 ]; then
+                    echo ""
+                    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Reminders  ━━━━━━━━━━━━━━━━━━━━${RESET}"
+                    echo -e "  ${YELLOW}Ensure these ports are open in Iran VPS firewall:${RESET}"
+                    for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
+                        local addr="${flag#tcp://}"
+                        local bp; bp=$(echo "$addr" | cut -d: -f2)
+                        echo -e "    ${CYAN}sudo ufw allow ${bp}/tcp${RESET}   (on Iran VPS)"
+                    done
+                    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+                fi
                 return
                 ;;
             6)
