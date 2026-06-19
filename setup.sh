@@ -212,12 +212,7 @@ configure_caddyfile() {
     local block
     block="${domain} {
     header -Server
-    @ws {
-        header Connection *Upgrade*
-        header Upgrade    websocket
-    }
-    reverse_proxy @ws localhost:${port}
-    respond 404
+    reverse_proxy localhost:${port}
 }"
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
@@ -232,15 +227,29 @@ configure_caddyfile() {
 import sys, re
 path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
-    content = f.read()
-pattern = re.compile(
-    r'^' + re.escape(domain) + r'\s*\{[^}]*\}',
-    re.MULTILINE | re.DOTALL
-)
-replacement = f"{domain} {{\n    reverse_proxy localhost:{port}\n}}"
-new_content = pattern.sub(replacement, content)
+    lines = f.read().split('\n')
+result = []
+i = 0
+replaced = False
+dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
+while i < len(lines):
+    if dom_pat.match(lines[i]):
+        # Skip the entire block by counting brace depth
+        depth = lines[i].count('{') - lines[i].count('}')
+        i += 1
+        while i < len(lines) and depth > 0:
+            depth += lines[i].count('{') - lines[i].count('}')
+            i += 1
+        # Insert updated block
+        result.append(f"{domain} {{\n    header -Server\n    reverse_proxy localhost:{port}\n}}")
+        replaced = True
+    else:
+        result.append(lines[i])
+        i += 1
+if not replaced:
+    result.append(f"\n{domain} {{\n    header -Server\n    reverse_proxy localhost:{port}\n}}")
 with open(path, 'w') as f:
-    f.write(new_content)
+    f.write('\n'.join(result))
 PYEOF
         success "Caddyfile updated."
     else
@@ -394,6 +403,7 @@ write_client_service() {
 Description=WStunnel Client
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -403,7 +413,6 @@ WorkingDirectory=/home/wstunnel
 ExecStart=${exec_full}
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 
@@ -433,6 +442,7 @@ write_server_service() {
 [Unit]
 Description=WStunnel Server
 After=network.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -442,7 +452,6 @@ WorkingDirectory=/home/wstunnel
 ExecStart=/usr/local/bin/wstunnel server ${exec_flags} ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}
 Restart=always
 RestartSec=3
-StartLimitIntervalSec=0
 StandardOutput=journal
 StandardError=journal
 
