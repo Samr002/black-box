@@ -131,7 +131,11 @@ setup_user() {
 # ─────────────────────────────────────────────
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
-    [ -f "$svc_file" ] || error "Client service not found: $svc_file"
+    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=()
+    if [ ! -f "$svc_file" ]; then
+        warn "Client service file not found — some values will be empty"
+        return
+    fi
     local exec_line wss_url
     exec_line=$(grep "^ExecStart=" "$svc_file" | sed 's/^ExecStart=//')
     wss_url=$(echo "$exec_line" | grep -oE 'wss://[^[:space:]]+')
@@ -145,7 +149,11 @@ parse_client_service() {
 
 parse_server_service() {
     local svc_file="/etc/systemd/system/wstunnel-server.service"
-    [ -f "$svc_file" ] || error "Server service not found: $svc_file"
+    PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018"
+    if [ ! -f "$svc_file" ]; then
+        warn "Server service file not found — using default values for diagnostics"
+        return
+    fi
     local exec_line ws_url
     exec_line=$(grep "^ExecStart=" "$svc_file" | sed 's/^ExecStart=//')
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
@@ -470,16 +478,36 @@ flow_diagnose() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    if [ ${#FOUND_SVCS[@]} -eq 0 ]; then
-        error "No wstunnel services found. Install first (option 1 or 2)."
+    local has_server=false has_client=false
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        [[ "$svc" == "wstunnel-server.service" ]] && has_server=true
+        [[ "$svc" == "wstunnel-client.service" ]] && has_client=true
+    done
+
+    # اگر هیچ سرویسی پیدا نشد، از کاربر بپرس
+    if ! $has_server && ! $has_client; then
+        echo ""
+        warn "No wstunnel service files found at /etc/systemd/system/"
+        echo -e "  (wstunnel may have been installed manually)"
+        echo ""
+        echo -e "  ${BOLD}Which VPS is this?${RESET}"
+        echo ""
+        echo -e "  ${CYAN}1${RESET}) Iran VPS   — server (wstunnel server + Caddy)"
+        echo -e "  ${CYAN}2${RESET}) Foreign VPS — client (wstunnel client, VPN service)"
+        echo ""
+        local ch
+        while true; do
+            read -rp "$(echo -e "  ${BOLD}Enter 1 or 2${RESET}: ")" ch
+            case "$ch" in
+                1) diagnose_server; return ;;
+                2) diagnose_client; return ;;
+                *) warn "Please enter 1 or 2." ;;
+            esac
+        done
     fi
 
-    for svc in "${FOUND_SVCS[@]}"; do
-        case "$svc" in
-            wstunnel-server.service) diagnose_server ;;
-            wstunnel-client.service) diagnose_client ;;
-        esac
-    done
+    $has_server && diagnose_server
+    $has_client && diagnose_client
 }
 
 # ─────────────────────────────────────────────
