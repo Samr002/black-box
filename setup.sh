@@ -110,6 +110,87 @@ wstunnel_bin() {
     fi
 }
 
+# مسیر دقیق باینری caddy را برمی‌گرداند
+caddy_bin() {
+    if   [ -x "/usr/bin/caddy" ];       then echo "/usr/bin/caddy"
+    elif [ -x "/usr/local/bin/caddy" ]; then echo "/usr/local/bin/caddy"
+    elif command -v caddy &>/dev/null;  then command -v caddy
+    else echo ""
+    fi
+}
+
+# نصب Caddy روی سیستم‌های Debian/Ubuntu
+install_caddy() {
+    local bin
+    bin=$(caddy_bin)
+    if [ -n "$bin" ]; then
+        info "Caddy already installed: $("$bin" version 2>&1 | head -n1)  [$bin]"
+        return
+    fi
+
+    info "Installing Caddy via apt..."
+    apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl 2>/dev/null
+    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+        | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+    curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+        | tee /etc/apt/sources.list.d/caddy-stable.list > /dev/null
+    apt-get update -qq
+    apt-get install -y caddy
+    success "Caddy installed: $(caddy_bin && "$(caddy_bin)" version 2>&1 | head -n1)"
+}
+
+# نوشتن یا به‌روز‌رسانی بلاک دامنه در Caddyfile
+configure_caddyfile() {
+    local domain="$1" port="$2"
+    local caddyfile="/etc/caddy/Caddyfile"
+
+    mkdir -p "$(dirname "$caddyfile")"
+
+    local block
+    block="${domain} {
+    reverse_proxy localhost:${port}
+}"
+
+    if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
+        # فایل وجود ندارد یا خالی است — از صفر بنویس
+        echo "$block" > "$caddyfile"
+        success "Caddyfile created."
+    elif grep -q "^${domain}" "$caddyfile" 2>/dev/null; then
+        # بلاک این دامنه از قبل وجود دارد — پورت را به‌روز کن
+        info "Domain ${domain} already in Caddyfile — updating reverse_proxy port..."
+        # با sed بلاک موجود را جایگزین کن
+        python3 - "$caddyfile" "$domain" "$port" <<'PYEOF'
+import sys, re
+path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(path) as f:
+    content = f.read()
+pattern = re.compile(
+    r'^' + re.escape(domain) + r'\s*\{[^}]*\}',
+    re.MULTILINE | re.DOTALL
+)
+replacement = f"{domain} {{\n    reverse_proxy localhost:{port}\n}}"
+new_content = pattern.sub(replacement, content)
+with open(path, 'w') as f:
+    f.write(new_content)
+PYEOF
+        success "Caddyfile updated."
+    else
+        # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
+        echo "" >> "$caddyfile"
+        echo "$block" >> "$caddyfile"
+        success "Domain block appended to existing Caddyfile."
+    fi
+
+    # اعتبارسنجی کانفیگ
+    local bin
+    bin=$(caddy_bin)
+    if "$bin" validate --config "$caddyfile" &>/dev/null 2>&1; then
+        success "Caddyfile is valid."
+    else
+        warn "Caddyfile validation warning — check with: $bin validate --config $caddyfile"
+    fi
+}
+
 install_wstunnel_binary() {
     local version="$1" arch
     arch=$(uname -m)
@@ -283,10 +364,12 @@ diagnose_server() {
     echo ""
 
     # 1. Binary
-    if command -v wstunnel &>/dev/null; then
-        check_ok "wstunnel binary: $(wstunnel --version 2>&1 | head -n1)"
+    local wbin
+    wbin=$(wstunnel_bin)
+    if [ -n "$wbin" ]; then
+        check_ok "wstunnel binary: $("$wbin" --version 2>&1 | head -n1)  [$wbin]"
     else
-        check_fail "wstunnel binary not found at /usr/local/bin/wstunnel"
+        check_fail "wstunnel binary not found (checked /usr/local/bin and /usr/bin)"
     fi
 
     # 2. Service running
@@ -320,16 +403,20 @@ diagnose_server() {
         check_fail "Port 443 is NOT listening — Caddy may not be configured for HTTPS"
     fi
 
-    # 6. Caddy config check
-    if command -v caddy &>/dev/null; then
-        if caddy validate --config /etc/caddy/Caddyfile &>/dev/null 2>&1; then
+    # 6. Caddy binary + config check
+    local cbin
+    cbin=$(caddy_bin)
+    if [ -n "$cbin" ]; then
+        check_ok "Caddy binary found: [$cbin]"
+        if "$cbin" validate --config /etc/caddy/Caddyfile &>/dev/null 2>&1; then
             check_ok "Caddyfile is valid"
         else
             check_fail "Caddyfile has errors"
-            echo -e "         ${YELLOW}→ sudo caddy validate --config /etc/caddy/Caddyfile${RESET}"
+            echo -e "         ${YELLOW}→ $cbin validate --config /etc/caddy/Caddyfile${RESET}"
         fi
     else
-        check_warn "caddy binary not found in PATH — skipping config validation"
+        check_fail "Caddy is NOT installed"
+        echo -e "         ${YELLOW}→ Run Install (option 1) to install Caddy automatically${RESET}"
     fi
 
     # 7. Firewall — check if common tools exist and show status
@@ -553,19 +640,33 @@ flow_server() {
     confirm "Proceed with server installation?" || { info "Aborted."; exit 0; }
     echo ""
 
+    # ── ۱. نصب wstunnel ────────────────────────────────
     install_wstunnel_binary "$WSTUNNEL_VERSION"
     setup_user
     write_server_service
 
+    # ── ۲. نصب و کانفیگ Caddy ──────────────────────────
+    echo ""
+    echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
+    install_caddy
+    configure_caddyfile "$DOMAIN" "$PARSED_BIND_PORT"
+
+    info "Enabling and starting Caddy..."
+    systemctl enable caddy
+    systemctl restart caddy
+    sleep 1
+    if systemctl is-active caddy &>/dev/null; then
+        success "Caddy is running."
+    else
+        warn "Caddy failed to start — check logs:"
+        journalctl -u caddy -n 20 --no-pager | sed 's/^/    /'
+    fi
+
+    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "${YELLOW}ACTION REQUIRED — Add this block to your Caddyfile:${RESET}"
-    echo ""
-    echo -e "${CYAN}${DOMAIN} {${RESET}"
-    echo -e "${CYAN}    reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
-    echo -e "${CYAN}}${RESET}"
-    echo ""
-    echo -e "Then reload Caddy:  ${CYAN}sudo systemctl reload caddy${RESET}"
-    echo -e "View logs:          ${CYAN}sudo journalctl -u wstunnel-server.service -f${RESET}"
+    echo -e "  wstunnel logs:  ${CYAN}sudo journalctl -u wstunnel-server.service -f${RESET}"
+    echo -e "  Caddy logs:     ${CYAN}sudo journalctl -u caddy -f${RESET}"
+    echo -e "  Caddyfile:      ${CYAN}/etc/caddy/Caddyfile${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     success "Iran VPS (server) setup complete."
