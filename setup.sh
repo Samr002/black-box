@@ -1,7 +1,7 @@
 #!/bin/bash
 # WStunnel + Caddy — Unified Setup Script
 # Traffic flow (-R reverse tunnel):
-#   User → Iran VPS:PORT → WSS tunnel → Foreign VPS:PORT (service lives here)
+#   User → Iran VPS:PORT → WSS tunnel → Foreign VPS:PORT (VPN service lives here)
 
 set -euo pipefail
 
@@ -15,13 +15,16 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*"; exit 1; }
+info()       { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success()    { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()       { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()      { echo -e "${RED}[ERROR]${RESET} $*"; exit 1; }
+check_ok()   { echo -e "  ${GREEN}[✓]${RESET} $*"; }
+check_fail() { echo -e "  ${RED}[✗]${RESET} $*"; }
+check_warn() { echo -e "  ${YELLOW}[!]${RESET} $*"; }
 
 # ─────────────────────────────────────────────
-# Global state (populated by parse_* functions)
+# Global parsed state
 # ─────────────────────────────────────────────
 PARSED_DOMAIN=""
 PARSED_WSS_PORT=""
@@ -56,20 +59,22 @@ confirm() {
 pick_action() {
     local varname="$1" choice
     echo -e "  ${CYAN}1${RESET}) ${BOLD}Install${RESET}   — Iran VPS     (wstunnel server + Caddy entry point)"
-    echo -e "  ${CYAN}2${RESET}) ${BOLD}Install${RESET}   — Foreign VPS  (wstunnel client, hosts the actual service)"
-    echo -e "  ${CYAN}3${RESET}) ${BOLD}Edit${RESET}      — manage ports and domain on this machine"
-    echo -e "  ${CYAN}4${RESET}) ${BOLD}Update${RESET}    — upgrade wstunnel binary to a newer version"
-    echo -e "  ${CYAN}5${RESET}) ${BOLD}Uninstall${RESET} — remove wstunnel completely from this machine"
+    echo -e "  ${CYAN}2${RESET}) ${BOLD}Install${RESET}   — Foreign VPS  (wstunnel client, hosts the VPN service)"
+    echo -e "  ${CYAN}3${RESET}) ${BOLD}Diagnose${RESET}  — check tunnel health layer by layer"
+    echo -e "  ${CYAN}4${RESET}) ${BOLD}Edit${RESET}      — manage ports and domain on this machine"
+    echo -e "  ${CYAN}5${RESET}) ${BOLD}Update${RESET}    — upgrade wstunnel binary to a newer version"
+    echo -e "  ${CYAN}6${RESET}) ${BOLD}Uninstall${RESET} — remove wstunnel completely from this machine"
     echo ""
     while true; do
-        read -rp "$(echo -e "  ${BOLD}Enter 1-5${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
         case "$choice" in
             1) printf -v "$varname" 'server';    return ;;
             2) printf -v "$varname" 'client';    return ;;
-            3) printf -v "$varname" 'edit';      return ;;
-            4) printf -v "$varname" 'update';    return ;;
-            5) printf -v "$varname" 'uninstall'; return ;;
-            *) warn "  Please enter a number between 1 and 5." ;;
+            3) printf -v "$varname" 'diagnose';  return ;;
+            4) printf -v "$varname" 'edit';      return ;;
+            5) printf -v "$varname" 'update';    return ;;
+            6) printf -v "$varname" 'uninstall'; return ;;
+            *) warn "  Please enter a number between 1 and 6." ;;
         esac
     done
 }
@@ -127,9 +132,8 @@ setup_user() {
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
     [ -f "$svc_file" ] || error "Client service not found: $svc_file"
-    local exec_line
+    local exec_line wss_url
     exec_line=$(grep "^ExecStart=" "$svc_file" | sed 's/^ExecStart=//')
-    local wss_url
     wss_url=$(echo "$exec_line" | grep -oE 'wss://[^[:space:]]+')
     PARSED_DOMAIN=$(echo "$wss_url"   | sed 's|wss://||' | sed 's|:[0-9]*$||')
     PARSED_WSS_PORT=$(echo "$wss_url" | grep -oE '[0-9]+$')
@@ -181,7 +185,7 @@ build_client_exec() {
 }
 
 # ─────────────────────────────────────────────
-# Write & restart service helpers
+# Write & restart helpers
 # ─────────────────────────────────────────────
 write_client_service() {
     local exec_full
@@ -245,6 +249,240 @@ EOF
 }
 
 # ─────────────────────────────────────────────
+# Diagnose — Iran VPS (server)
+# ─────────────────────────────────────────────
+diagnose_server() {
+    parse_server_service
+
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━  Iran VPS (Server) Diagnostics  ━━━━━━━━━━━${RESET}"
+    echo ""
+
+    # 1. Binary
+    if command -v wstunnel &>/dev/null; then
+        check_ok "wstunnel binary: $(wstunnel --version 2>&1 | head -n1)"
+    else
+        check_fail "wstunnel binary not found at /usr/local/bin/wstunnel"
+    fi
+
+    # 2. Service running
+    if systemctl is-active wstunnel-server.service &>/dev/null; then
+        check_ok "wstunnel-server.service is running"
+    else
+        check_fail "wstunnel-server.service is NOT running"
+        echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-server.service${RESET}"
+    fi
+
+    # 3. wstunnel port bound
+    if ss -tlnp 2>/dev/null | grep -q ":${PARSED_BIND_PORT} "; then
+        check_ok "wstunnel is bound to port ${PARSED_BIND_PORT}"
+    else
+        check_fail "wstunnel is NOT bound to port ${PARSED_BIND_PORT} — service may have crashed"
+        echo -e "         ${YELLOW}→ sudo journalctl -u wstunnel-server.service -n 30${RESET}"
+    fi
+
+    # 4. Caddy running
+    if systemctl is-active caddy &>/dev/null; then
+        check_ok "Caddy is running"
+    else
+        check_fail "Caddy is NOT running"
+        echo -e "         ${YELLOW}→ sudo systemctl start caddy${RESET}"
+    fi
+
+    # 5. Port 443 open
+    if ss -tlnp 2>/dev/null | grep -q ":443 "; then
+        check_ok "Port 443 is listening (Caddy/HTTPS ready)"
+    else
+        check_fail "Port 443 is NOT listening — Caddy may not be configured for HTTPS"
+    fi
+
+    # 6. Caddy config check
+    if command -v caddy &>/dev/null; then
+        if caddy validate --config /etc/caddy/Caddyfile &>/dev/null 2>&1; then
+            check_ok "Caddyfile is valid"
+        else
+            check_fail "Caddyfile has errors"
+            echo -e "         ${YELLOW}→ sudo caddy validate --config /etc/caddy/Caddyfile${RESET}"
+        fi
+    else
+        check_warn "caddy binary not found in PATH — skipping config validation"
+    fi
+
+    # 7. Firewall — check if common tools exist and show status
+    echo ""
+    echo -e "  ${BOLD}Firewall:${RESET}"
+    if command -v ufw &>/dev/null; then
+        local ufw_status
+        ufw_status=$(ufw status 2>/dev/null | head -1)
+        echo -e "    ufw: ${YELLOW}${ufw_status}${RESET}"
+        echo -e "    ${YELLOW}→ Make sure port 443 and your forwarded ports are allowed${RESET}"
+        echo -e "    ${YELLOW}→ sudo ufw allow 443/tcp${RESET}"
+    elif command -v iptables &>/dev/null; then
+        check_warn "iptables detected — manually verify port 443 is open"
+        echo -e "    ${YELLOW}→ iptables -L INPUT -n | grep 443${RESET}"
+    else
+        check_warn "No firewall tool detected (ufw/iptables)"
+    fi
+
+    # 8. Recent logs
+    echo ""
+    echo -e "  ${BOLD}Last 15 log lines:${RESET}"
+    journalctl -u wstunnel-server.service -n 15 --no-pager 2>/dev/null \
+        | sed 's/^/    /' \
+        || echo -e "    ${YELLOW}(no logs available)${RESET}"
+
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+}
+
+# ─────────────────────────────────────────────
+# Diagnose — Foreign VPS (client)
+# ─────────────────────────────────────────────
+diagnose_client() {
+    parse_client_service
+
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━  Foreign VPS (Client) Diagnostics  ━━━━━━━━━━${RESET}"
+    echo ""
+
+    # 1. Binary
+    if command -v wstunnel &>/dev/null; then
+        check_ok "wstunnel binary: $(wstunnel --version 2>&1 | head -n1)"
+    else
+        check_fail "wstunnel binary not found at /usr/local/bin/wstunnel"
+    fi
+
+    # 2. Service running
+    if systemctl is-active wstunnel-client.service &>/dev/null; then
+        check_ok "wstunnel-client.service is running"
+    else
+        check_fail "wstunnel-client.service is NOT running"
+        echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-client.service${RESET}"
+    fi
+
+    # 3. DNS resolution
+    local resolved=""
+    if resolved=$(getent hosts "${PARSED_DOMAIN}" 2>/dev/null | awk '{print $1}' | head -1) && [ -n "$resolved" ]; then
+        check_ok "DNS: ${PARSED_DOMAIN} → ${resolved}"
+    else
+        check_fail "DNS cannot resolve ${PARSED_DOMAIN}"
+        echo -e "         ${YELLOW}→ Check domain A record points to Iran VPS IP${RESET}"
+        echo -e "         ${YELLOW}→ nslookup ${PARSED_DOMAIN}${RESET}"
+    fi
+
+    # 4. HTTPS reachability to Iran VPS
+    local http_code
+    http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
+        --max-time 6 \
+        "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null || echo "000")
+    if [ "$http_code" != "000" ]; then
+        check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
+    else
+        check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (timeout/refused)"
+        echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
+        echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
+        echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+    fi
+
+    # 5. VPN service listening check (local side — traffic arrives here via -R)
+    echo ""
+    echo -e "  ${BOLD}Local VPN service check (traffic arrives on THIS machine):${RESET}"
+    echo -e "  ${YELLOW}(With -R, ports open on Iran VPS; your VPN service must run HERE)${RESET}"
+    echo ""
+
+    local any_missing=false
+    for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
+        local addr="${flag#tcp://}"
+        local bh bp dh dp
+        bh=$(echo "$addr" | cut -d: -f1)
+        bp=$(echo "$addr" | cut -d: -f2)
+        dh=$(echo "$addr" | cut -d: -f3)
+        dp=$(echo "$addr" | cut -d: -f4)
+
+        if ss -tlnp 2>/dev/null | grep -qE ":${dp} "; then
+            local proc
+            proc=$(ss -tlnp 2>/dev/null | grep ":${dp} " | grep -oP 'users:\(\("\K[^"]+' | head -1 || echo "?")
+            check_ok "Port ${dp} is listening  [process: ${proc}]  ← Iran VPS:${bp} forwards here"
+        else
+            check_fail "NOTHING is listening on ${dh}:${dp}"
+            echo -e "         ${RED}Your VPN/proxy service is NOT running on this port!${RESET}"
+            echo -e "         ${YELLOW}→ Iran VPS:${bp} will forward traffic here but no service accepts it${RESET}"
+            echo -e "         ${YELLOW}→ Start your VPN service (Xray, V2Ray, etc.) on port ${dp}${RESET}"
+            any_missing=true
+        fi
+    done
+
+    # 6. Tunnel connectivity self-test
+    echo ""
+    echo -e "  ${BOLD}Tunnel self-test (5 s timeout):${RESET}"
+    local tunnel_ok=false
+    for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
+        local addr="${flag#tcp://}"
+        local bp dp
+        bp=$(echo "$addr" | cut -d: -f2)
+        dp=$(echo "$addr" | cut -d: -f4)
+
+        # Try to connect through the tunnel: connect to Iran VPS:bp → should arrive at local:dp
+        if timeout 5 bash -c "echo >/dev/tcp/${PARSED_DOMAIN}/${bp}" 2>/dev/null; then
+            check_ok "Tunnel port ${bp} on Iran VPS is reachable from here"
+            tunnel_ok=true
+        else
+            check_fail "Iran VPS:${bp} is NOT reachable (tunnel port closed or firewall blocking)"
+            echo -e "         ${YELLOW}→ On Iran VPS run: sudo ufw allow ${bp}/tcp${RESET}"
+            echo -e "         ${YELLOW}→ Check wstunnel-server logs on Iran VPS${RESET}"
+        fi
+    done
+
+    # 7. Recent logs
+    echo ""
+    echo -e "  ${BOLD}Last 20 log lines:${RESET}"
+    journalctl -u wstunnel-client.service -n 20 --no-pager 2>/dev/null \
+        | sed 's/^/    /' \
+        || echo -e "    ${YELLOW}(no logs available)${RESET}"
+
+    # 8. Summary verdict
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━  Verdict  ━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    if $any_missing; then
+        echo -e "  ${RED}Most likely cause: VPN service not running on this Foreign VPS.${RESET}"
+        echo -e "  The wstunnel tunnel may be working fine, but there is nothing"
+        echo -e "  listening on the destination port to accept the forwarded traffic."
+        echo ""
+        echo -e "  ${YELLOW}Fix: start your VPN/proxy (Xray, V2Ray, Shadowsocks, etc.)${RESET}"
+        echo -e "  ${YELLOW}and make sure it listens on the local port shown above.${RESET}"
+    elif ! $tunnel_ok; then
+        echo -e "  ${RED}Most likely cause: Iran VPS firewall blocking the forward port(s).${RESET}"
+        echo -e "  The tunnel control channel (WSS/443) seems reachable, but the"
+        echo -e "  reverse-forwarded port(s) are not accessible."
+        echo ""
+        echo -e "  ${YELLOW}Fix: open the port(s) in Iran VPS firewall (ufw/iptables).${RESET}"
+    else
+        echo -e "  ${GREEN}Tunnel appears healthy. If VPN still fails, check VPN client config.${RESET}"
+        echo -e "  Make sure the VPN client points to Iran VPS IP and the correct port."
+    fi
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+}
+
+# ─────────────────────────────────────────────
+# flow_diagnose — detect and route
+# ─────────────────────────────────────────────
+flow_diagnose() {
+    declare -a FOUND_SVCS=()
+    detect_services FOUND_SVCS
+
+    if [ ${#FOUND_SVCS[@]} -eq 0 ]; then
+        error "No wstunnel services found. Install first (option 1 or 2)."
+    fi
+
+    for svc in "${FOUND_SVCS[@]}"; do
+        case "$svc" in
+            wstunnel-server.service) diagnose_server ;;
+            wstunnel-client.service) diagnose_client ;;
+        esac
+    done
+}
+
+# ─────────────────────────────────────────────
 # Install — Iran VPS (server)
 # ─────────────────────────────────────────────
 flow_server() {
@@ -304,7 +542,9 @@ flow_client() {
 
     echo ""
     echo -e "${BOLD}─── Port mappings ─────────────────────────────────────${RESET}"
-    echo -e "  How ${BOLD}-R${RESET} works:  [User] → ${YELLOW}Iran VPS${RESET}:PORT → tunnel → ${GREEN}this VPS${RESET}:PORT"
+    echo -e "  How ${BOLD}-R${RESET} works:"
+    echo -e "    [User] → ${YELLOW}Iran VPS${RESET}:IRAN_PORT  →  WSS tunnel  →  ${GREEN}this VPS${RESET}:LOCAL_PORT"
+    echo -e "  Ports open on Iran VPS. Your VPN service must run on LOCAL_PORT here."
     echo ""
 
     PARSED_FLAGS=()
@@ -316,8 +556,8 @@ flow_client() {
         echo -e "  ${BOLD}── Mapping #${count} ──${RESET}"
         ask IRAN_BIND_IP "Bind IP on Iran VPS (0.0.0.0 = public)" "0.0.0.0"
         ask IRAN_PORT    "Port to open on Iran VPS (users connect here)" "8443"
-        ask LOCAL_HOST   "Local host on this Foreign VPS" "localhost"
-        ask LOCAL_PORT   "Local port on this Foreign VPS" "${IRAN_PORT}"
+        ask LOCAL_HOST   "Local host on this Foreign VPS (VPN service listens here)" "localhost"
+        ask LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
         PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
         IRAN_PORTS+=("${IRAN_PORT}")
         echo ""
@@ -348,62 +588,61 @@ flow_client() {
     write_client_service
 
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "${YELLOW}ACTION REQUIRED — Open these ports in Iran VPS firewall:${RESET}"
+    echo -e "${YELLOW}REQUIRED STEPS after this:${RESET}"
     echo ""
+    echo -e "  ${BOLD}1. Open these ports in Iran VPS firewall:${RESET}"
     for port in "${IRAN_PORTS[@]}"; do
-        echo -e "  ${CYAN}sudo ufw allow ${port}/tcp${RESET}"
+        echo -e "     ${CYAN}sudo ufw allow ${port}/tcp${RESET}   (on Iran VPS)"
     done
     echo ""
-    echo -e "View logs:  ${CYAN}sudo journalctl -u wstunnel-client.service -f${RESET}"
+    echo -e "  ${BOLD}2. Make sure your VPN service runs on this Foreign VPS:${RESET}"
+    for flag in "${PARSED_FLAGS[@]}"; do
+        local addr="${flag#tcp://}"
+        local dp
+        dp=$(echo "$addr" | cut -d: -f4)
+        echo -e "     ${CYAN}port ${dp} must be listening here${RESET} (Xray, V2Ray, etc.)"
+    done
+    echo ""
+    echo -e "  ${BOLD}3. Run Diagnose (option 3) to verify everything is working.${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     success "Foreign VPS (client) setup complete."
 }
 
 # ─────────────────────────────────────────────
-# Edit — server (Iran VPS)
+# Edit — server
 # ─────────────────────────────────────────────
 edit_server() {
     parse_server_service
-
     echo ""
     echo -e "${BOLD}─── Current Server Configuration ─────────────────────${RESET}"
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo ""
-
-    ask NEW_BIND_IP   "New bind IP" "${PARSED_BIND_IP}"
+    ask NEW_BIND_IP   "New bind IP"   "${PARSED_BIND_IP}"
     ask NEW_BIND_PORT "New bind port" "${PARSED_BIND_PORT}"
 
     if [ "$NEW_BIND_IP" = "$PARSED_BIND_IP" ] && [ "$NEW_BIND_PORT" = "$PARSED_BIND_PORT" ]; then
-        info "No changes made."
-        return
+        info "No changes made."; return
     fi
-
     PARSED_BIND_IP="$NEW_BIND_IP"
     PARSED_BIND_PORT="$NEW_BIND_PORT"
-
     echo ""
     echo -e "  New config: ${CYAN}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
     echo ""
     confirm "Apply and restart service?" || { info "Cancelled."; return; }
     echo ""
-
     write_server_service
-
     if [ "$NEW_BIND_PORT" != "2018" ]; then
-        echo ""
-        warn "Port changed — also update your Caddyfile:"
-        echo -e "  ${CYAN}reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
+        warn "Port changed — update your Caddyfile: reverse_proxy localhost:${PARSED_BIND_PORT}"
         echo -e "  Then: ${CYAN}sudo systemctl reload caddy${RESET}"
     fi
 }
 
 # ─────────────────────────────────────────────
-# Edit — client (Foreign VPS)
+# Edit — client
 # ─────────────────────────────────────────────
 edit_client() {
     parse_client_service
-
     local changed=false
 
     while true; do
@@ -416,11 +655,7 @@ edit_client() {
         echo -e "  ${CYAN}2${RESET}) Edit an existing port mapping"
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
-        if $changed; then
-            echo -e "  ${CYAN}5${RESET}) ${GREEN}Apply changes and restart service${RESET}"
-        else
-            echo -e "  ${CYAN}5${RESET}) Apply changes and restart service"
-        fi
+        echo -e "  ${CYAN}5${RESET}) Apply changes and restart service"
         echo -e "  ${CYAN}6${RESET}) Cancel (discard all changes)"
         echo ""
 
@@ -428,136 +663,106 @@ edit_client() {
         read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
 
         case "$choice" in
-
-            1)  # ── Add port ──────────────────────────────────────
+            1)
                 echo ""
                 echo -e "  ${BOLD}── New Port Mapping ──${RESET}"
                 ask IRAN_BIND_IP "Bind IP on Iran VPS" "0.0.0.0"
-                ask IRAN_PORT    "Port to open on Iran VPS (users connect here)" "8443"
+                ask IRAN_PORT    "Port to open on Iran VPS" "8443"
                 ask LOCAL_HOST   "Local host on this Foreign VPS" "localhost"
                 ask LOCAL_PORT   "Local port on this Foreign VPS" "${IRAN_PORT}"
                 PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
                 changed=true
                 success "Port mapping added."
                 ;;
-
-            2)  # ── Edit port ─────────────────────────────────────
-                if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
-                    warn "No port mappings to edit."; continue
-                fi
+            2)
+                [ ${#PARSED_FLAGS[@]} -eq 0 ] && { warn "No port mappings to edit."; continue; }
                 echo ""
                 echo -e "  Which mapping to edit?"
                 for i in "${!PARSED_FLAGS[@]}"; do
-                    local addr="${PARSED_FLAGS[$i]#tcp://}"
-                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$addr" | cut -d: -f1):$(echo "$addr" | cut -d: -f2)  →  $(echo "$addr" | cut -d: -f3):$(echo "$addr" | cut -d: -f4)"
+                    local a="${PARSED_FLAGS[$i]#tcp://}"
+                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
                 done
                 echo ""
                 local e_idx
                 read -rp "$(echo -e "  ${BOLD}Enter number${RESET}: ")" e_idx
                 if [[ "$e_idx" =~ ^[0-9]+$ ]] && (( e_idx >= 1 && e_idx <= ${#PARSED_FLAGS[@]} )); then
                     local idx=$((e_idx - 1))
-                    local old_addr="${PARSED_FLAGS[$idx]#tcp://}"
-                    local old_bh old_bp old_dh old_dp
-                    old_bh=$(echo "$old_addr" | cut -d: -f1)
-                    old_bp=$(echo "$old_addr" | cut -d: -f2)
-                    old_dh=$(echo "$old_addr" | cut -d: -f3)
-                    old_dp=$(echo "$old_addr" | cut -d: -f4)
+                    local oa="${PARSED_FLAGS[$idx]#tcp://}"
                     echo ""
-                    ask IRAN_BIND_IP "Bind IP on Iran VPS"               "$old_bh"
-                    ask IRAN_PORT    "Port to open on Iran VPS"           "$old_bp"
-                    ask LOCAL_HOST   "Local host on this Foreign VPS"     "$old_dh"
-                    ask LOCAL_PORT   "Local port on this Foreign VPS"     "$old_dp"
+                    ask IRAN_BIND_IP "Bind IP on Iran VPS"           "$(echo "$oa"|cut -d: -f1)"
+                    ask IRAN_PORT    "Port on Iran VPS"               "$(echo "$oa"|cut -d: -f2)"
+                    ask LOCAL_HOST   "Local host on this Foreign VPS" "$(echo "$oa"|cut -d: -f3)"
+                    ask LOCAL_PORT   "Local port on this Foreign VPS" "$(echo "$oa"|cut -d: -f4)"
                     PARSED_FLAGS[$idx]="tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
-                    changed=true
-                    success "Mapping #${e_idx} updated."
+                    changed=true; success "Mapping #${e_idx} updated."
                 else
                     warn "Invalid selection."
                 fi
                 ;;
-
-            3)  # ── Remove port ───────────────────────────────────
-                if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
-                    warn "No port mappings to remove."; continue
-                fi
+            3)
+                [ ${#PARSED_FLAGS[@]} -eq 0 ] && { warn "No port mappings to remove."; continue; }
                 echo ""
                 echo -e "  Which mapping to remove?"
                 for i in "${!PARSED_FLAGS[@]}"; do
-                    local addr="${PARSED_FLAGS[$i]#tcp://}"
-                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$addr" | cut -d: -f1):$(echo "$addr" | cut -d: -f2)  →  $(echo "$addr" | cut -d: -f3):$(echo "$addr" | cut -d: -f4)"
+                    local a="${PARSED_FLAGS[$i]#tcp://}"
+                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
                 done
                 echo ""
                 local r_idx
                 read -rp "$(echo -e "  ${BOLD}Enter number${RESET}: ")" r_idx
                 if [[ "$r_idx" =~ ^[0-9]+$ ]] && (( r_idx >= 1 && r_idx <= ${#PARSED_FLAGS[@]} )); then
                     local rm=$((r_idx - 1))
-                    local new_flags=()
+                    local nf=()
                     for j in "${!PARSED_FLAGS[@]}"; do
-                        [ "$j" -ne "$rm" ] && new_flags+=("${PARSED_FLAGS[$j]}")
+                        [ "$j" -ne "$rm" ] && nf+=("${PARSED_FLAGS[$j]}")
                     done
                     PARSED_FLAGS=()
-                    for f in "${new_flags[@]+"${new_flags[@]}"}"; do
-                        PARSED_FLAGS+=("$f")
-                    done
-                    changed=true
-                    success "Mapping #${r_idx} removed."
+                    for f in "${nf[@]+"${nf[@]}"}"; do PARSED_FLAGS+=("$f"); done
+                    changed=true; success "Mapping #${r_idx} removed."
                 else
                     warn "Invalid selection."
                 fi
                 ;;
-
-            4)  # ── Change domain ─────────────────────────────────
+            4)
                 echo ""
-                ask NEW_DOMAIN   "New Iran VPS domain" "${PARSED_DOMAIN}"
-                ask NEW_WSS_PORT "New WSS port"        "${PARSED_WSS_PORT}"
+                ask NEW_DOMAIN   "New Iran VPS domain"  "${PARSED_DOMAIN}"
+                ask NEW_WSS_PORT "New WSS port"         "${PARSED_WSS_PORT}"
                 if [ "$NEW_DOMAIN" != "$PARSED_DOMAIN" ] || [ "$NEW_WSS_PORT" != "$PARSED_WSS_PORT" ]; then
                     PARSED_DOMAIN="$NEW_DOMAIN"
                     PARSED_WSS_PORT="$NEW_WSS_PORT"
-                    changed=true
-                    success "Domain updated."
+                    changed=true; success "Domain updated."
                 else
                     info "No changes."
                 fi
                 ;;
-
-            5)  # ── Apply ─────────────────────────────────────────
-                if ! $changed; then
-                    info "No changes to apply."
-                    continue
-                fi
+            5)
+                ! $changed && { info "No changes to apply."; continue; }
                 echo ""
                 echo -e "${BOLD}─── New Configuration ────────────────────────────────${RESET}"
                 show_client_state
                 echo ""
                 echo -e "  ExecStart:  ${CYAN}$(build_client_exec)${RESET}"
                 echo ""
-                confirm "Apply these changes and restart service?" || continue
+                confirm "Apply and restart service?" || continue
                 echo ""
                 write_client_service
                 return
                 ;;
-
-            6)  # ── Cancel ────────────────────────────────────────
-                info "No changes applied."
-                return
-                ;;
-
+            6)
+                info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 6."
-                ;;
+                warn "Please enter a number between 1 and 6." ;;
         esac
     done
 }
 
 # ─────────────────────────────────────────────
-# flow_edit — detect service and route
+# flow_edit
 # ─────────────────────────────────────────────
 flow_edit() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
-
-    if [ ${#FOUND_SVCS[@]} -eq 0 ]; then
-        error "No wstunnel services found on this machine. Run Install (option 1 or 2) first."
-    fi
+    [ ${#FOUND_SVCS[@]} -eq 0 ] && error "No wstunnel services found. Install first (option 1 or 2)."
 
     local has_server=false has_client=false
     for svc in "${FOUND_SVCS[@]}"; do
@@ -567,10 +772,10 @@ flow_edit() {
 
     if $has_server && $has_client; then
         echo ""
-        echo -e "${BOLD}Both services found. Which one to edit?${RESET}"
+        echo -e "${BOLD}Both services found. Which to edit?${RESET}"
         echo ""
-        echo -e "  ${CYAN}1${RESET}) Iran VPS   — wstunnel-server.service  (bind IP / port)"
-        echo -e "  ${CYAN}2${RESET}) Foreign VPS — wstunnel-client.service  (ports + domain)"
+        echo -e "  ${CYAN}1${RESET}) Iran VPS   — wstunnel-server (bind IP / port)"
+        echo -e "  ${CYAN}2${RESET}) Foreign VPS — wstunnel-client (ports + domain)"
         echo ""
         local sc
         while true; do
@@ -581,46 +786,38 @@ flow_edit() {
                 *) warn "Please enter 1 or 2." ;;
             esac
         done
-    elif $has_server; then
-        edit_server
-    else
-        edit_client
+    elif $has_server; then edit_server
+    else edit_client
     fi
 }
 
 # ─────────────────────────────────────────────
-# Update — upgrade wstunnel binary
+# Update
 # ─────────────────────────────────────────────
 flow_update() {
     echo ""
-    if command -v wstunnel &>/dev/null; then
-        info "Current version: $(wstunnel --version 2>&1 | head -n1)"
-    else
-        error "wstunnel is not installed. Use Install (option 1 or 2) first."
-    fi
+    command -v wstunnel &>/dev/null \
+        && info "Current version: $(wstunnel --version 2>&1 | head -n1)" \
+        || error "wstunnel is not installed. Use Install (option 1 or 2) first."
 
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
+    [ ${#FOUND_SVCS[@]} -gt 0 ] && {
         echo -e "  Services found:"
         for svc in "${FOUND_SVCS[@]}"; do
-            local st
-            st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+            local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
             echo -e "    ${CYAN}${svc}${RESET}  [${st}]"
         done
-    fi
-
+    }
     echo ""
     ask NEW_VERSION "Version to upgrade to" "10.5.5"
-
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Action         :  ${GREEN}Update wstunnel binary${RESET}"
     echo -e "  Target version :  ${YELLOW}${NEW_VERSION}${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
-
     confirm "Proceed with update?" || { info "Aborted."; exit 0; }
     echo ""
 
@@ -637,12 +834,11 @@ flow_update() {
         systemctl status "$svc" --no-pager
         echo ""
     done
-
     success "Update complete: $(wstunnel --version 2>&1 | head -n1)"
 }
 
 # ─────────────────────────────────────────────
-# Uninstall — remove wstunnel completely
+# Uninstall
 # ─────────────────────────────────────────────
 flow_uninstall() {
     echo ""
@@ -654,24 +850,21 @@ flow_uninstall() {
     id "wstunnel" &>/dev/null        && user_exists=true
 
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $binary_exists && ! $user_exists; then
-        info "Nothing to remove — wstunnel is not installed on this machine."
-        exit 0
+        info "Nothing to remove — wstunnel is not installed."; exit 0
     fi
 
     echo -e "${BOLD}─── Will be removed ───────────────────────────────────${RESET}"
     echo ""
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        local st
-        st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+        local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
         echo -e "  ${CYAN}service${RESET}  /etc/systemd/system/${svc}  [${st}]"
     done
     $binary_exists && echo -e "  ${CYAN}binary${RESET}   /usr/local/bin/wstunnel"
     $user_exists   && echo -e "  ${CYAN}user${RESET}     wstunnel  +  /home/wstunnel/"
     echo ""
-    echo -e "${RED}  All items above will be permanently removed.${RESET}"
+    echo -e "  ${RED}All items above will be permanently removed.${RESET}"
     echo ""
-
-    confirm "Are you sure you want to uninstall wstunnel completely?" || { info "Aborted."; exit 0; }
+    confirm "Are you sure?" || { info "Aborted."; exit 0; }
     echo ""
 
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
@@ -679,22 +872,16 @@ flow_uninstall() {
         systemctl stop    "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}"
-        success "Removed /etc/systemd/system/${svc}"
+        success "Removed ${svc}"
     done
+    [ ${#FOUND_SVCS[@]} -gt 0 ] && { systemctl daemon-reload; systemctl reset-failed 2>/dev/null || true; }
 
-    [ ${#FOUND_SVCS[@]} -gt 0 ] && systemctl daemon-reload && systemctl reset-failed 2>/dev/null || true
-
-    if $binary_exists; then
-        rm -f /usr/local/bin/wstunnel
-        success "Removed /usr/local/bin/wstunnel"
-    fi
-
+    $binary_exists && { rm -f /usr/local/bin/wstunnel; success "Removed /usr/local/bin/wstunnel"; }
     if $user_exists; then
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
         success "Removed user 'wstunnel' and /home/wstunnel/"
     fi
-
     echo ""
     success "wstunnel has been completely removed from this machine."
 }
@@ -722,6 +909,7 @@ main() {
     case "$ACTION" in
         server)    flow_server    ;;
         client)    flow_client    ;;
+        diagnose)  flow_diagnose  ;;
         edit)      flow_edit      ;;
         update)    flow_update    ;;
         uninstall) flow_uninstall ;;
