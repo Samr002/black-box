@@ -68,9 +68,10 @@ pick_action() {
     echo -e "  ${CYAN}4${RESET}) ${BOLD}Edit${RESET}      — manage ports and domain on this machine"
     echo -e "  ${CYAN}5${RESET}) ${BOLD}Update${RESET}    — upgrade wstunnel binary to a newer version"
     echo -e "  ${CYAN}6${RESET}) ${BOLD}Uninstall${RESET} — remove wstunnel completely from this machine"
+    echo -e "  ${CYAN}7${RESET}) ${BOLD}Exit${RESET}"
     echo ""
     while true; do
-        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
         case "$choice" in
             1) printf -v "$varname" 'server';    return ;;
             2) printf -v "$varname" 'client';    return ;;
@@ -78,7 +79,8 @@ pick_action() {
             4) printf -v "$varname" 'edit';      return ;;
             5) printf -v "$varname" 'update';    return ;;
             6) printf -v "$varname" 'uninstall'; return ;;
-            *) warn "  Please enter a number between 1 and 6." ;;
+            7) echo ""; info "Goodbye."; exit 0 ;;
+            *) warn "  Please enter a number between 1 and 7." ;;
         esac
     done
 }
