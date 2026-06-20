@@ -31,6 +31,7 @@ PARSED_WSS_PORT=""
 declare -a PARSED_FLAGS=()
 PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
+declare -a PARSED_DOMAINS=()
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -267,6 +268,37 @@ PYEOF
     fi
 }
 
+remove_caddyfile_domain() {
+    local domain="$1"
+    local caddyfile="/etc/caddy/Caddyfile"
+    [ -f "$caddyfile" ] || return
+    python3 - "$caddyfile" "$domain" <<'PYEOF'
+import sys, re
+path, domain = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    lines = f.read().split('\n')
+result = []
+i = 0
+dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
+while i < len(lines):
+    if dom_pat.match(lines[i]):
+        depth = lines[i].count('{') - lines[i].count('}')
+        i += 1
+        while i < len(lines) and depth > 0:
+            depth += lines[i].count('{') - lines[i].count('}')
+            i += 1
+        if i < len(lines) and not lines[i].strip():
+            i += 1
+    else:
+        result.append(lines[i])
+        i += 1
+output = '\n'.join(result).strip()
+with open(path, 'w') as f:
+    f.write(output + '\n' if output else '')
+PYEOF
+    success "Domain ${domain} removed from Caddyfile."
+}
+
 install_wstunnel_binary() {
     local version="$1" arch
     arch=$(uname -m)
@@ -335,6 +367,41 @@ parse_server_service() {
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
 }
 
+parse_server_domains() {
+    PARSED_DOMAINS=()
+    local caddyfile="/etc/caddy/Caddyfile"
+    [ -f "$caddyfile" ] || return
+    local bind_port="${PARSED_BIND_PORT:-2018}"
+    while IFS= read -r d; do
+        [ -n "$d" ] && PARSED_DOMAINS+=("$d")
+    done < <(python3 - "$caddyfile" "$bind_port" <<'PYEOF'
+import sys, re
+path, port = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        lines = f.read().split('\n')
+except Exception:
+    sys.exit(0)
+i = 0
+while i < len(lines):
+    m = re.match(r'^(\S+)\s*\{', lines[i])
+    if m:
+        domain = m.group(1)
+        block = [lines[i]]
+        depth = lines[i].count('{') - lines[i].count('}')
+        i += 1
+        while i < len(lines) and depth > 0:
+            depth += lines[i].count('{') - lines[i].count('}')
+            block.append(lines[i])
+            i += 1
+        if f'reverse_proxy localhost:{port}' in '\n'.join(block):
+            print(domain)
+    else:
+        i += 1
+PYEOF
+)
+}
+
 # ─────────────────────────────────────────────
 # Display / build helpers
 # ─────────────────────────────────────────────
@@ -353,6 +420,19 @@ show_client_state() {
             dh=$(echo "$addr" | cut -d: -f3)
             dp=$(echo "$addr" | cut -d: -f4)
             echo -e "    ${CYAN}#$((i+1))${RESET}  Iran VPS ${bh}:${bp}  →  this VPS ${dh}:${dp}"
+        done
+    fi
+}
+
+show_server_state() {
+    echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
+    echo ""
+    echo -e "  ${BOLD}Domains (Caddyfile):${RESET}"
+    if [ ${#PARSED_DOMAINS[@]} -eq 0 ]; then
+        echo -e "    ${YELLOW}(no domains configured)${RESET}"
+    else
+        for i in "${!PARSED_DOMAINS[@]}"; do
+            echo -e "    ${CYAN}#$((i+1))${RESET}  ${PARSED_DOMAINS[$i]}  →  :443  →  localhost:${PARSED_BIND_PORT}"
         done
     fi
 }
@@ -787,16 +867,29 @@ flow_server() {
     ask PARSED_BIND_PORT "Port wstunnel server listens on" "2018"
 
     echo ""
-    echo -e "${BOLD}─── Caddy / Domain ────────────────────────────────────${RESET}"
-    ask DOMAIN "Tunnel subdomain pointing to this Iran VPS (e.g. tunnel.example.com)" ""
+    echo -e "${BOLD}─── Caddy / Domains ───────────────────────────────────${RESET}"
+    echo -e "  ${YELLOW}Each domain must have a DNS A record pointing to this Iran VPS IP.${RESET}"
+    echo -e "  ${YELLOW}You can add multiple domains for domain rotation or multi-location.${RESET}"
+    echo ""
+
+    PARSED_DOMAINS=()
+    local count=0
+    while true; do
+        count=$((count + 1))
+        ask NEW_DOMAIN "Domain #${count} (e.g. tunnel.example.com)" ""
+        PARSED_DOMAINS+=("${NEW_DOMAIN}")
+        echo ""
+        confirm "Add another domain?" || break
+        echo ""
+    done
 
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Mode             :  ${GREEN}Iran VPS — Server${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
-    echo -e "  wstunnel listens :  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    echo -e "  Caddy domain     :  ${YELLOW}${DOMAIN}${RESET}"
-    echo -e "  Caddy proxies    :  ${CYAN}${DOMAIN}:443  →  localhost:${PARSED_BIND_PORT}${RESET}"
+    echo ""
+    show_server_state
+    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
@@ -812,7 +905,9 @@ flow_server() {
     echo ""
     echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
     install_caddy
-    configure_caddyfile "$DOMAIN" "$PARSED_BIND_PORT"
+    for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
+        configure_caddyfile "$dom" "$PARSED_BIND_PORT"
+    done
 
     info "Enabling and starting Caddy..."
     systemctl enable caddy
@@ -922,50 +1017,118 @@ flow_client() {
 # ─────────────────────────────────────────────
 edit_server() {
     parse_server_service
-
-    echo ""
-    echo -e "${BOLD}─── Current Server Configuration ─────────────────────${RESET}"
-    echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    echo ""
-
+    parse_server_domains
+    local changed=false
     local old_ip="${PARSED_BIND_IP}" old_port="${PARSED_BIND_PORT}"
-    ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
-    ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
+    local -a DOMAINS_TO_REMOVE=()
 
-    if [ "${NEW_BIND_IP}" = "${old_ip}" ] && [ "${NEW_BIND_PORT}" = "${old_port}" ]; then
-        info "No changes — service not restarted."; return
-    fi
-
-    PARSED_BIND_IP="${NEW_BIND_IP}"
-    PARSED_BIND_PORT="${NEW_BIND_PORT}"
-
-    echo ""
-    echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
-    echo -e "  wstunnel listens :  ${CYAN}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    echo ""
-    confirm "Apply and restart service?" || { info "Cancelled."; return; }
-    echo ""
-    write_server_service
-
-    if [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
+    while true; do
         echo ""
-        info "Bind port changed — updating Caddyfile automatically..."
-        local caddy_domain
-        caddy_domain=$(grep -m1 ' {$' /etc/caddy/Caddyfile 2>/dev/null | awk '{print $1}' || true)
-        if [ -n "$caddy_domain" ]; then
-            configure_caddyfile "$caddy_domain" "${PARSED_BIND_PORT}"
-            local cbin; cbin=$(caddy_bin)
-            if [ -n "$cbin" ]; then
-                systemctl reload caddy && success "Caddy reloaded with new port."
-            else
-                warn "Caddy binary not found — reload manually: systemctl reload caddy"
-            fi
-        else
-            warn "Could not read domain from /etc/caddy/Caddyfile — update manually:"
-            echo -e "  Edit Caddyfile: ${CYAN}reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
-            echo -e "  Then: ${CYAN}systemctl reload caddy${RESET}"
-        fi
-    fi
+        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Edit Server  ━━━━━━━━━━━━━━━━━━━${RESET}"
+        show_server_state
+        echo ""
+        echo -e "${BOLD}─── Options ───────────────────────────────────────────${RESET}"
+        echo -e "  ${CYAN}1${RESET}) Add domain"
+        echo -e "  ${CYAN}2${RESET}) Remove domain"
+        echo -e "  ${CYAN}3${RESET}) Change bind IP / port"
+        echo -e "  ${CYAN}4${RESET}) Apply changes"
+        echo -e "  ${CYAN}5${RESET}) Cancel"
+        echo ""
+
+        local choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-5${RESET}: ")" choice
+
+        case "$choice" in
+            1)
+                echo ""
+                ask NEW_DOMAIN "New domain (e.g. tunnel2.example.com)" ""
+                local dup=false
+                for d in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
+                    [ "$d" = "${NEW_DOMAIN}" ] && dup=true && break
+                done
+                if $dup; then
+                    warn "Domain ${NEW_DOMAIN} is already configured."
+                else
+                    PARSED_DOMAINS+=("${NEW_DOMAIN}")
+                    changed=true
+                    success "Domain ${NEW_DOMAIN} added (apply to save)."
+                fi
+                ;;
+            2)
+                [ ${#PARSED_DOMAINS[@]} -eq 0 ] && { warn "No domains configured."; continue; }
+                echo ""
+                echo -e "  Which domain to remove?"
+                for i in "${!PARSED_DOMAINS[@]}"; do
+                    echo -e "    ${CYAN}$((i+1))${RESET}  ${PARSED_DOMAINS[$i]}"
+                done
+                echo ""
+                local r_idx
+                read -rp "$(echo -e "  ${BOLD}Enter number${RESET}: ")" r_idx
+                if [[ "$r_idx" =~ ^[0-9]+$ ]] && (( r_idx >= 1 && r_idx <= ${#PARSED_DOMAINS[@]} )); then
+                    local rm_dom="${PARSED_DOMAINS[$((r_idx-1))]}"
+                    DOMAINS_TO_REMOVE+=("$rm_dom")
+                    local nf=()
+                    for j in "${!PARSED_DOMAINS[@]}"; do
+                        [ "$j" -ne "$((r_idx-1))" ] && nf+=("${PARSED_DOMAINS[$j]}")
+                    done
+                    PARSED_DOMAINS=()
+                    for f in "${nf[@]+"${nf[@]}"}"; do PARSED_DOMAINS+=("$f"); done
+                    changed=true
+                    success "Domain ${rm_dom} will be removed on apply."
+                else
+                    warn "Invalid selection."
+                fi
+                ;;
+            3)
+                echo ""
+                ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
+                ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
+                if [ "${NEW_BIND_IP}" != "${PARSED_BIND_IP}" ] || [ "${NEW_BIND_PORT}" != "${PARSED_BIND_PORT}" ]; then
+                    PARSED_BIND_IP="${NEW_BIND_IP}"
+                    PARSED_BIND_PORT="${NEW_BIND_PORT}"
+                    changed=true
+                    success "Bind address updated (apply to save)."
+                else
+                    info "No changes."
+                fi
+                ;;
+            4)
+                ! $changed && { info "No changes to apply."; continue; }
+                echo ""
+                echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
+                show_server_state
+                echo ""
+                confirm "Apply changes?" || continue
+                echo ""
+
+                # wstunnel service — only restart if bind address changed
+                if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
+                    write_server_service
+                fi
+
+                # Caddyfile — update all remaining domains (handles port change + new domains)
+                for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
+                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
+                done
+                # Remove deleted domains from Caddyfile
+                for dom in "${DOMAINS_TO_REMOVE[@]+"${DOMAINS_TO_REMOVE[@]}"}"; do
+                    remove_caddyfile_domain "$dom"
+                done
+
+                local cbin; cbin=$(caddy_bin)
+                if [ -n "$cbin" ]; then
+                    systemctl reload caddy && success "Caddy reloaded."
+                else
+                    warn "Caddy binary not found — reload manually: systemctl reload caddy"
+                fi
+                return
+                ;;
+            5)
+                info "No changes applied."; return ;;
+            *)
+                warn "Please enter a number between 1 and 5." ;;
+        esac
+    done
 }
 
 # ─────────────────────────────────────────────
