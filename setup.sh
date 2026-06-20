@@ -519,6 +519,96 @@ EOF
 }
 
 # ─────────────────────────────────────────────
+# Scheduled restart timer helpers
+# ─────────────────────────────────────────────
+get_restart_interval() {
+    local type="$1"
+    local tfile="/etc/systemd/system/wstunnel-${type}-restart.timer"
+    if [ -f "$tfile" ]; then
+        local h; h=$(grep "^OnUnitActiveSec=" "$tfile" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+        echo "${h:-0}"
+    else
+        echo "0"
+    fi
+}
+
+ask_restart_interval() {
+    local varname="$1" current="${2:-0}"
+    echo ""
+    echo -e "  ${BOLD}Scheduled auto-restart interval${RESET}  (current: ${YELLOW}${current}h${RESET}):"
+    echo -e "    ${CYAN}0${RESET}   Disabled"
+    echo -e "    ${CYAN}1${RESET}   Every  1 hour"
+    echo -e "    ${CYAN}2${RESET}   Every  2 hours"
+    echo -e "    ${CYAN}3${RESET}   Every  3 hours"
+    echo -e "    ${CYAN}4${RESET}   Every  4 hours"
+    echo -e "    ${CYAN}6${RESET}   Every  6 hours"
+    echo -e "    ${CYAN}8${RESET}   Every  8 hours"
+    echo -e "    ${CYAN}12${RESET}  Every 12 hours"
+    echo ""
+    local val
+    while true; do
+        read -rp "$(echo -e "  ${BOLD}Enter 0/1/2/3/4/6/8/12${RESET}: ")" val
+        case "$val" in
+            0|1|2|3|4|6|8|12) printf -v "$varname" '%s' "$val"; return ;;
+            *) warn "Please enter one of: 0 1 2 3 4 6 8 12" ;;
+        esac
+    done
+}
+
+write_restart_timer() {
+    local type="$1" hours="$2"
+    local svc_name="wstunnel-${type}"
+    local timer_name="wstunnel-${type}-restart"
+    local label; [ "$type" = "server" ] && label="Server" || label="Client"
+
+    info "Writing ${timer_name}.service ..."
+    cat > "/etc/systemd/system/${timer_name}.service" <<EOF
+[Unit]
+Description=WStunnel ${label} Scheduled Restart
+After=${svc_name}.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart ${svc_name}.service
+EOF
+
+    info "Writing ${timer_name}.timer (every ${hours}h) ..."
+    cat > "/etc/systemd/system/${timer_name}.timer" <<EOF
+[Unit]
+Description=WStunnel ${label} Restart every ${hours}h
+
+[Timer]
+OnBootSec=${hours}h
+OnUnitActiveSec=${hours}h
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "${timer_name}.timer"
+    systemctl start  "${timer_name}.timer"
+    success "Restart timer enabled: every ${hours} hour(s)."
+    echo -e "  ${YELLOW}Check: systemctl status ${timer_name}.timer${RESET}"
+}
+
+remove_restart_timer() {
+    local type="$1"
+    local timer_name="wstunnel-${type}-restart"
+    if [ -f "/etc/systemd/system/${timer_name}.timer" ]; then
+        systemctl stop    "${timer_name}.timer" 2>/dev/null || true
+        systemctl disable "${timer_name}.timer" 2>/dev/null || true
+        rm -f "/etc/systemd/system/${timer_name}.timer"
+        rm -f "/etc/systemd/system/${timer_name}.service"
+        systemctl daemon-reload
+        success "Restart timer disabled and removed."
+    else
+        info "No restart timer configured."
+    fi
+}
+
+# ─────────────────────────────────────────────
 # Diagnose — Iran VPS (server)
 # ─────────────────────────────────────────────
 diagnose_server() {
@@ -884,11 +974,22 @@ flow_server() {
     done
 
     echo ""
+    echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
+    echo -e "  ${YELLOW}Periodic restart keeps the tunnel fresh and clears stale connections.${RESET}"
+    local SERVER_RESTART_HOURS
+    ask_restart_interval SERVER_RESTART_HOURS "0"
+
+    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Mode             :  ${GREEN}Iran VPS — Server${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
     echo ""
     show_server_state
+    if [ "$SERVER_RESTART_HOURS" != "0" ]; then
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  ${YELLOW}every ${SERVER_RESTART_HOURS}h${RESET}"
+    else
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  ${YELLOW}disabled${RESET}"
+    fi
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
@@ -918,6 +1019,13 @@ flow_server() {
     else
         warn "Caddy failed to start — check logs:"
         journalctl -u caddy -n 20 --no-pager | sed 's/^/    /'
+    fi
+
+    # ── ۳. تایمر ری‌استارت ──────────────────────────────
+    if [ "$SERVER_RESTART_HOURS" != "0" ]; then
+        echo ""
+        echo -e "${BOLD}─── Restart Timer ─────────────────────────────────────${RESET}"
+        write_restart_timer "server" "$SERVER_RESTART_HOURS"
     fi
 
     echo ""
@@ -972,6 +1080,12 @@ flow_client() {
     exec_full=$(build_client_exec)
 
     echo ""
+    echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
+    echo -e "  ${YELLOW}Periodic restart reconnects the tunnel and clears stale WebSocket connections.${RESET}"
+    local CLIENT_RESTART_HOURS
+    ask_restart_interval CLIENT_RESTART_HOURS "0"
+
+    echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "  Mode             :  ${GREEN}Foreign VPS — Client${RESET}"
     echo -e "  wstunnel version :  ${YELLOW}${WSTUNNEL_VERSION}${RESET}"
@@ -980,6 +1094,11 @@ flow_client() {
     show_client_state
     echo ""
     echo -e "  ExecStart:  ${CYAN}${exec_full}${RESET}"
+    if [ "$CLIENT_RESTART_HOURS" != "0" ]; then
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  ${YELLOW}every ${CLIENT_RESTART_HOURS}h${RESET}"
+    else
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  ${YELLOW}disabled${RESET}"
+    fi
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
@@ -989,6 +1108,13 @@ flow_client() {
     install_wstunnel_binary "$WSTUNNEL_VERSION"
     setup_user
     write_client_service
+
+    # ── تایمر ری‌استارت ──────────────────────────────
+    if [ "$CLIENT_RESTART_HOURS" != "0" ]; then
+        echo ""
+        echo -e "${BOLD}─── Restart Timer ─────────────────────────────────────${RESET}"
+        write_restart_timer "client" "$CLIENT_RESTART_HOURS"
+    fi
 
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo -e "${YELLOW}REQUIRED STEPS after this:${RESET}"
@@ -1027,16 +1153,20 @@ edit_server() {
         echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Edit Server  ━━━━━━━━━━━━━━━━━━━${RESET}"
         show_server_state
         echo ""
+        local cur_restart; cur_restart=$(get_restart_interval "server")
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  $([ "$cur_restart" != "0" ] && echo "${GREEN}every ${cur_restart}h${RESET}" || echo "${YELLOW}disabled${RESET}")"
+        echo ""
         echo -e "${BOLD}─── Options ───────────────────────────────────────────${RESET}"
         echo -e "  ${CYAN}1${RESET}) Add domain"
         echo -e "  ${CYAN}2${RESET}) Remove domain"
         echo -e "  ${CYAN}3${RESET}) Change bind IP / port"
-        echo -e "  ${CYAN}4${RESET}) Apply changes"
-        echo -e "  ${CYAN}5${RESET}) Cancel"
+        echo -e "  ${CYAN}4${RESET}) Configure scheduled restart"
+        echo -e "  ${CYAN}5${RESET}) Apply changes"
+        echo -e "  ${CYAN}6${RESET}) Cancel"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-5${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1093,6 +1223,17 @@ edit_server() {
                 fi
                 ;;
             4)
+                local cur_h; cur_h=$(get_restart_interval "server")
+                ask_restart_interval NEW_RESTART_H "$cur_h"
+                if [ "$NEW_RESTART_H" = "0" ]; then
+                    remove_restart_timer "server"
+                elif [ "$NEW_RESTART_H" != "$cur_h" ]; then
+                    write_restart_timer "server" "$NEW_RESTART_H"
+                else
+                    info "No changes to restart timer."
+                fi
+                ;;
+            5)
                 ! $changed && { info "No changes to apply."; continue; }
                 echo ""
                 echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
@@ -1123,10 +1264,10 @@ edit_server() {
                 fi
                 return
                 ;;
-            5)
+            6)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 5." ;;
+                warn "Please enter a number between 1 and 6." ;;
         esac
     done
 }
@@ -1143,17 +1284,21 @@ edit_client() {
         echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Edit Client  ━━━━━━━━━━━━━━━━━━━${RESET}"
         show_client_state
         echo ""
+        local cur_restart_c; cur_restart_c=$(get_restart_interval "client")
+        echo -e "  ${BOLD}Auto-restart      :${RESET}  $([ "$cur_restart_c" != "0" ] && echo "${GREEN}every ${cur_restart_c}h${RESET}" || echo "${YELLOW}disabled${RESET}")"
+        echo ""
         echo -e "${BOLD}─── Options ───────────────────────────────────────────${RESET}"
         echo -e "  ${CYAN}1${RESET}) Add new port mapping"
         echo -e "  ${CYAN}2${RESET}) Edit an existing port mapping"
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
-        echo -e "  ${CYAN}5${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}6${RESET}) Cancel (discard all changes)"
+        echo -e "  ${CYAN}5${RESET}) Configure scheduled restart"
+        echo -e "  ${CYAN}6${RESET}) Apply changes and restart service"
+        echo -e "  ${CYAN}7${RESET}) Cancel (discard all changes)"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1229,6 +1374,17 @@ edit_client() {
                 fi
                 ;;
             5)
+                local cur_hc; cur_hc=$(get_restart_interval "client")
+                ask_restart_interval NEW_RESTART_HC "$cur_hc"
+                if [ "$NEW_RESTART_HC" = "0" ]; then
+                    remove_restart_timer "client"
+                elif [ "$NEW_RESTART_HC" != "$cur_hc" ]; then
+                    write_restart_timer "client" "$NEW_RESTART_HC"
+                else
+                    info "No changes to restart timer."
+                fi
+                ;;
+            6)
                 ! $changed && { info "No changes to apply."; continue; }
                 if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
                     warn "No port mappings configured — wstunnel will start with no -R flags."
@@ -1256,10 +1412,10 @@ edit_client() {
                 fi
                 return
                 ;;
-            6)
+            7)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 6." ;;
+                warn "Please enter a number between 1 and 7." ;;
         esac
     done
 }
@@ -1383,6 +1539,11 @@ flow_uninstall() {
     local wstunnel_bin_exists=false; [ -n "$wbin" ] && wstunnel_bin_exists=true
     local wstunnel_user_exists=false; id "wstunnel" &>/dev/null && wstunnel_user_exists=true
 
+    # ── restart timer detection ─────────────────
+    local server_timer_exists=false client_timer_exists=false
+    [ -f "/etc/systemd/system/wstunnel-server-restart.timer" ] && server_timer_exists=true
+    [ -f "/etc/systemd/system/wstunnel-client-restart.timer" ] && client_timer_exists=true
+
     # Detect if this is an Iran VPS (server) install
     local has_server=false
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
@@ -1413,7 +1574,8 @@ flow_uninstall() {
 
     # ── Nothing to do? ──────────────────────────
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $wstunnel_bin_exists && ! $wstunnel_user_exists \
-        && ! $caddy_ours_binary && ! $caddy_ours_apt; then
+        && ! $caddy_ours_binary && ! $caddy_ours_apt \
+        && ! $server_timer_exists && ! $client_timer_exists; then
         info "Nothing to remove — wstunnel is not installed on this machine."; exit 0
     fi
 
@@ -1426,6 +1588,8 @@ flow_uninstall() {
     done
     $wstunnel_bin_exists  && echo -e "  ${CYAN}wstunnel binary${RESET}   ${wbin}"
     $wstunnel_user_exists && echo -e "  ${CYAN}wstunnel user${RESET}     wstunnel  +  /home/wstunnel/"
+    $server_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-server-restart.{timer,service}"
+    $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
 
     if $caddy_ours_binary; then
         local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
@@ -1529,17 +1693,30 @@ PYEOF
         fi
     fi
 
-    # ── 3. systemctl reload ─────────────────────
+    # ── 3. restart timers ──────────────────────
+    for _timer_type in server client; do
+        local _tname="wstunnel-${_timer_type}-restart"
+        if [ -f "/etc/systemd/system/${_tname}.timer" ]; then
+            info "Removing restart timer: ${_tname} ..."
+            systemctl stop    "${_tname}.timer"   2>/dev/null || true
+            systemctl disable "${_tname}.timer"   2>/dev/null || true
+            rm -f "/etc/systemd/system/${_tname}.timer"
+            rm -f "/etc/systemd/system/${_tname}.service"
+            success "Removed ${_tname} timer."
+        fi
+    done
+
+    # ── 4. systemctl reload ─────────────────────
     systemctl daemon-reload
     systemctl reset-failed 2>/dev/null || true
 
-    # ── 4. wstunnel binary ──────────────────────
+    # ── 5. wstunnel binary ──────────────────────
     if $wstunnel_bin_exists; then
         rm -f "$wbin"
         success "Removed ${wbin}"
     fi
 
-    # ── 5. wstunnel user ────────────────────────
+    # ── 6. wstunnel user ────────────────────────
     if $wstunnel_user_exists; then
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
