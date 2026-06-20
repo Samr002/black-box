@@ -235,55 +235,59 @@ configure_caddyfile() {
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
         # فایل وجود ندارد یا خالی است — از صفر بنویس
-        echo "$block" > "$caddyfile"
-        success "Caddyfile created."
-    elif grep -q "^${domain}" "$caddyfile" 2>/dev/null; then
+        printf '%s\n' "$block" > "$caddyfile"
+        success "Caddyfile created with domain ${domain}."
+    elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
         # بلاک این دامنه از قبل وجود دارد — پورت را به‌روز کن
-        info "Domain ${domain} already in Caddyfile — updating reverse_proxy port..."
-        # با sed بلاک موجود را جایگزین کن
+        info "Updating ${domain} in Caddyfile (port → ${port})..."
         python3 - "$caddyfile" "$domain" "$port" <<'PYEOF'
 import sys, re
 path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
-    lines = f.read().split('\n')
+    content = f.read()
+lines = content.split('\n')
 result = []
 i = 0
 replaced = False
 dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if dom_pat.match(lines[i]):
-        # Skip the entire block by counting brace depth
         depth = lines[i].count('{') - lines[i].count('}')
         i += 1
         while i < len(lines) and depth > 0:
             depth += lines[i].count('{') - lines[i].count('}')
             i += 1
-        # Insert updated block
-        result.append(f"{domain} {{\n    header -Server\n    reverse_proxy localhost:{port}\n}}")
+        # Insert updated block as separate lines (no embedded \n)
+        result.extend([f"{domain} {{", "    header -Server",
+                        f"    reverse_proxy localhost:{port}", "}"])
         replaced = True
     else:
         result.append(lines[i])
         i += 1
 if not replaced:
-    result.append(f"\n{domain} {{\n    header -Server\n    reverse_proxy localhost:{port}\n}}")
+    result.extend(["", f"{domain} {{", "    header -Server",
+                   f"    reverse_proxy localhost:{port}", "}"])
+output = '\n'.join(result)
+if not output.endswith('\n'):
+    output += '\n'
 with open(path, 'w') as f:
-    f.write('\n'.join(result))
+    f.write(output)
 PYEOF
-        success "Caddyfile updated."
+        success "Caddyfile updated for ${domain}."
     else
         # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
-        echo "" >> "$caddyfile"
-        echo "$block" >> "$caddyfile"
-        success "Domain block appended to existing Caddyfile."
+        printf '\n%s\n' "$block" >> "$caddyfile"
+        success "Domain ${domain} added to Caddyfile."
     fi
 
     # اعتبارسنجی کانفیگ
-    local bin
-    bin=$(caddy_bin)
-    if "$bin" validate --config "$caddyfile" &>/dev/null 2>&1; then
-        success "Caddyfile is valid."
-    else
-        warn "Caddyfile validation warning — check with: $bin validate --config $caddyfile"
+    local cbin; cbin=$(caddy_bin)
+    if [ -n "$cbin" ]; then
+        if "$cbin" validate --config "$caddyfile" &>/dev/null 2>&1; then
+            success "Caddyfile is valid."
+        else
+            warn "Caddyfile validation failed — check: $cbin validate --config $caddyfile"
+        fi
     fi
 }
 
@@ -291,6 +295,11 @@ remove_caddyfile_domain() {
     local domain="$1"
     local caddyfile="/etc/caddy/Caddyfile"
     [ -f "$caddyfile" ] || return
+    # اگه دامنه اصلاً در فایل نیست، کاری نکن
+    if ! grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
+        info "Domain ${domain} not found in Caddyfile — nothing to remove."
+        return
+    fi
     python3 - "$caddyfile" "$domain" <<'PYEOF'
 import sys, re
 path, domain = sys.argv[1], sys.argv[2]
@@ -301,16 +310,19 @@ i = 0
 dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if dom_pat.match(lines[i]):
+        # Consume the entire block
         depth = lines[i].count('{') - lines[i].count('}')
         i += 1
         while i < len(lines) and depth > 0:
             depth += lines[i].count('{') - lines[i].count('}')
             i += 1
+        # Skip one blank line after the block (separator)
         if i < len(lines) and not lines[i].strip():
             i += 1
     else:
         result.append(lines[i])
         i += 1
+# Strip trailing blank lines, write clean file
 output = '\n'.join(result).strip()
 with open(path, 'w') as f:
     f.write(output + '\n' if output else '')
@@ -1245,6 +1257,7 @@ edit_server() {
     local changed=false
     local old_ip="${PARSED_BIND_IP}" old_port="${PARSED_BIND_PORT}"
     local -a DOMAINS_TO_REMOVE=()
+    local -a ADDED_DOMAINS=()   # فقط دامنه‌هایی که این session اضافه شدن
 
     while true; do
         echo ""
@@ -1278,6 +1291,7 @@ edit_server() {
                     warn "Domain ${NEW_DOMAIN} is already configured."
                 else
                     PARSED_DOMAINS+=("${NEW_DOMAIN}")
+                    ADDED_DOMAINS+=("${NEW_DOMAIN}")
                     changed=true
                     success "Domain ${NEW_DOMAIN} added (apply to save)."
                 fi
@@ -1285,7 +1299,7 @@ edit_server() {
             2)
                 [ ${#PARSED_DOMAINS[@]} -eq 0 ] && { warn "No domains configured."; continue; }
                 echo ""
-                echo -e "  Which domain to remove?"
+                echo -e "  ${BOLD}Which domain to remove?${RESET}"
                 for i in "${!PARSED_DOMAINS[@]}"; do
                     echo -e "    ${CYAN}$((i+1))${RESET}  ${PARSED_DOMAINS[$i]}"
                 done
@@ -1294,7 +1308,21 @@ edit_server() {
                 read -rp "$(echo -e "  ${BOLD}Enter number${RESET}: ")" r_idx
                 if [[ "$r_idx" =~ ^[0-9]+$ ]] && (( r_idx >= 1 && r_idx <= ${#PARSED_DOMAINS[@]} )); then
                     local rm_dom="${PARSED_DOMAINS[$((r_idx-1))]}"
-                    DOMAINS_TO_REMOVE+=("$rm_dom")
+                    echo ""
+                    warn "Removing ${rm_dom} will disconnect any Foreign VPS clients tunneling through it."
+                    confirm "  Confirm removal?" || continue
+                    # اگه از همین session اضافه شده بود، از ADDED_DOMAINS هم حذف کن
+                    local new_added=()
+                    for a in "${ADDED_DOMAINS[@]+"${ADDED_DOMAINS[@]}"}"; do
+                        [ "$a" != "$rm_dom" ] && new_added+=("$a")
+                    done
+                    ADDED_DOMAINS=()
+                    for a in "${new_added[@]+"${new_added[@]}"}"; do ADDED_DOMAINS+=("$a"); done
+                    # اگه از Caddyfile بود، در DOMAINS_TO_REMOVE بذار
+                    local was_in_caddy=false
+                    grep -qF "${rm_dom} {" "/etc/caddy/Caddyfile" 2>/dev/null && was_in_caddy=true
+                    $was_in_caddy && DOMAINS_TO_REMOVE+=("$rm_dom")
+                    # از PARSED_DOMAINS حذف کن
                     local nf=()
                     for j in "${!PARSED_DOMAINS[@]}"; do
                         [ "$j" -ne "$((r_idx-1))" ] && nf+=("${PARSED_DOMAINS[$j]}")
@@ -1334,29 +1362,63 @@ edit_server() {
             5)
                 ! $changed && { info "No changes to apply."; continue; }
                 echo ""
-                echo -e "${BOLD}─── New Configuration ─────────────────────────────────${RESET}"
-                show_server_state
+                echo -e "${BOLD}─── Changes Summary ───────────────────────────────────${RESET}"
+                if [ ${#DOMAINS_TO_REMOVE[@]} -gt 0 ]; then
+                    echo -e "  ${RED}Remove:${RESET}"
+                    for dom in "${DOMAINS_TO_REMOVE[@]}"; do
+                        echo -e "    ${RED}✗${RESET}  ${dom}"
+                    done
+                fi
+                if [ ${#ADDED_DOMAINS[@]} -gt 0 ]; then
+                    echo -e "  ${GREEN}Add:${RESET}"
+                    for dom in "${ADDED_DOMAINS[@]}"; do
+                        echo -e "    ${GREEN}✓${RESET}  ${dom}"
+                    done
+                fi
+                if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
+                    echo -e "  ${CYAN}Bind:${RESET}  ${old_ip}:${old_port}  →  ${PARSED_BIND_IP}:${PARSED_BIND_PORT}"
+                fi
                 echo ""
                 confirm "Apply changes?" || continue
                 echo ""
 
-                # wstunnel service — only restart if bind address changed
+                # 1. wstunnel service — فقط اگه bind address تغییر کرده
+                local port_changed=false
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     write_server_service
+                    port_changed=true
                 fi
 
-                # Caddyfile — update all remaining domains (handles port change + new domains)
-                for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
-                done
-                # Remove deleted domains from Caddyfile
+                # 2. اول دامنه‌های حذفی رو از Caddyfile بردار (بدون دست زدن به بقیه)
                 for dom in "${DOMAINS_TO_REMOVE[@]+"${DOMAINS_TO_REMOVE[@]}"}"; do
                     remove_caddyfile_domain "$dom"
                 done
 
+                # 3. بعد دامنه‌های جدید رو اضافه/آپدیت کن
+                # اگه پورت عوض شده: همه دامنه‌های باقیمونده رو آپدیت کن
+                # اگه پورت نعوض نشده: فقط دامنه‌های تازه‌اضافه‌شده رو configure کن
+                if $port_changed; then
+                    for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
+                    done
+                else
+                    for dom in "${ADDED_DOMAINS[@]+"${ADDED_DOMAINS[@]}"}"; do
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
+                    done
+                fi
+
+                # 4. Caddy reload
+                if [ ${#PARSED_DOMAINS[@]} -eq 0 ]; then
+                    warn "No domains remain — Caddy has nothing to proxy."
+                    warn "Clients cannot connect until you add a domain (option 1)."
+                fi
                 local cbin; cbin=$(caddy_bin)
                 if [ -n "$cbin" ]; then
-                    systemctl reload caddy && success "Caddy reloaded."
+                    if systemctl reload caddy 2>/dev/null; then
+                        success "Caddy reloaded successfully."
+                    else
+                        warn "Caddy reload failed — check: systemctl status caddy"
+                    fi
                 else
                     warn "Caddy binary not found — reload manually: systemctl reload caddy"
                 fi
