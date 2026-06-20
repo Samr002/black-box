@@ -795,22 +795,70 @@ diagnose_server() {
         echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
     fi
 
-    # 9. بررسی لاگ برای خطاهای رایج
+    # 12. Multi-location: نمایش پورت‌های -R باز شده توسط کلاینت‌ها
+    echo ""
+    echo -e "  ${BOLD}Reverse Tunnel Ports (opened by Foreign VPS clients):${RESET}"
+    local _wstunnel_pid
+    _wstunnel_pid=$(systemctl show wstunnel-server.service --property=MainPID --value 2>/dev/null || echo "")
+    # پورت‌هایی که wstunnel روشون listen می‌کنه (به جز پورت خودش)
+    local _r_ports
+    _r_ports=$(ss -tlnp 2>/dev/null \
+        | grep "wstunnel\|pid=${_wstunnel_pid}," \
+        | grep -v ":${PARSED_BIND_PORT} " \
+        | awk '{print $4}' | sort -u)
+    if [ -n "$_r_ports" ]; then
+        while IFS= read -r _p; do
+            [ -z "$_p" ] && continue
+            echo -e "    ${GREEN}✓${RESET}  ${_p}  — client connected and port is open"
+        done <<< "$_r_ports"
+        local _conn_count
+        _conn_count=$(ss -tnp 2>/dev/null \
+            | grep "pid=${_wstunnel_pid}," 2>/dev/null \
+            | grep -c "ESTAB" 2>/dev/null || echo "?")
+        echo -e "    ${CYAN}Active WebSocket connections: ${_conn_count}${RESET}"
+    else
+        check_warn "No -R ports bound — no Foreign VPS client is currently connected"
+        echo -e "         ${YELLOW}→ Check client service on each Foreign VPS:${RESET}"
+        echo -e "         ${CYAN}   systemctl status wstunnel-client.service${RESET}"
+    fi
+
+    # 13. بررسی لاگ برای خطاهای رایج
+    echo ""
+    echo -e "  ${BOLD}Log analysis:${RESET}"
     local recent_logs
-    recent_logs=$(journalctl -u wstunnel-server.service -n 30 --no-pager 2>/dev/null || true)
+    recent_logs=$(journalctl -u wstunnel-server.service -n 50 --no-pager 2>/dev/null || true)
 
     if echo "$recent_logs" | grep -q "Rejecting connection with not allowed destination"; then
-        check_fail "Recent logs confirm: reverse tunnel connections are being REJECTED"
+        check_fail "Logs: reverse tunnel connections are being REJECTED (--restrict-to)"
         echo -e "         ${YELLOW}→ Run the fix above (remove --restrict-to) and restart service${RESET}"
     fi
 
+    if echo "$recent_logs" | grep -q "error.*bind\|address already in use\|EADDRINUSE"; then
+        check_fail "Logs: port binding error — two clients trying to use the same -R port!"
+        echo -e "         ${RED}Each Foreign VPS must use a unique Iran VPS port.${RESET}"
+        echo -e "         ${YELLOW}→ Edit the conflicting client and change its Iran VPS port${RESET}"
+    fi
+
+    # کلاینت‌هایی که در لاگ‌ها connect/disconnect کردن
+    local _client_ips
+    _client_ips=$(echo "$recent_logs" \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+        | grep -v "127\.0\.0\." \
+        | sort -u | head -10)
+    if [ -n "$_client_ips" ]; then
+        echo -e "    ${CYAN}Seen client IPs in recent logs:${RESET}"
+        echo "$_client_ips" | while IFS= read -r _ip; do
+            echo -e "      ${CYAN}${_ip}${RESET}"
+        done
+    fi
+
     if echo "$recent_logs" | grep -q "Invalid protocol version"; then
-        check_warn "Some non-WebSocket clients are connecting (normal — browsers/scanners)"
+        check_warn "Some non-WebSocket traffic detected (normal — browsers/scanners)"
     fi
 
     echo ""
-    echo -e "  ${BOLD}Last 15 log lines:${RESET}"
-    echo "$recent_logs" | tail -15 | sed 's/^/    /'
+    echo -e "  ${BOLD}Last 20 log lines:${RESET}"
+    echo "$recent_logs" | tail -20 | sed 's/^/    /'
 
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -974,11 +1022,29 @@ diagnose_client() {
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
 
-    # 9. Recent logs
+    # 9. Log analysis
     echo ""
-    echo -e "  ${BOLD}Last 20 log lines:${RESET}"
-    journalctl -u wstunnel-client.service -n 20 --no-pager 2>/dev/null \
-        | sed 's/^/    /' \
+    echo -e "  ${BOLD}Log analysis:${RESET}"
+    local _cli_logs
+    _cli_logs=$(journalctl -u wstunnel-client.service -n 50 --no-pager 2>/dev/null || true)
+
+    if echo "$_cli_logs" | grep -qi "error.*bind\|address already in use\|EADDRINUSE\|already.*listen"; then
+        check_fail "Logs: port binding error — another client is already using that Iran VPS port!"
+        echo -e "         ${RED}Two Foreign VPS clients using the same Iran port.${RESET}"
+        echo -e "         ${YELLOW}→ Edit → option 4 → change Iran VPS port to a unique value${RESET}"
+    fi
+
+    if echo "$_cli_logs" | grep -qi "refused\|timeout\|unreachable\|connection.*reset"; then
+        check_warn "Logs: connection errors detected — Iran VPS may be unreachable or rejecting"
+    fi
+
+    if echo "$_cli_logs" | grep -qi "register.*reverse\|reverse.*register\|start.*listen"; then
+        check_ok "Logs: reverse tunnel registration messages found (client connected)"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Last 30 log lines:${RESET}"
+    echo "$_cli_logs" | tail -30 | sed 's/^/    /' \
         || echo -e "    ${YELLOW}(no logs available)${RESET}"
 
     # 10. Summary verdict
@@ -1018,6 +1084,10 @@ diagnose_client() {
         echo -e "  ${GREEN}Tunnel appears healthy. If VPN still fails, check VPN client config.${RESET}"
         echo -e "  Make sure the VPN client points to Iran VPS IP and the correct port."
     fi
+    echo ""
+    echo -e "  ${BOLD}Multi-location tip:${RESET} To see ALL connected clients and their ports,"
+    echo -e "  run Diagnose on the ${YELLOW}Iran VPS${RESET} — it shows every bound -R port and"
+    echo -e "  active WebSocket connection from each Foreign VPS."
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 }
 
