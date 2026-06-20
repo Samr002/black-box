@@ -231,13 +231,16 @@ configure_caddyfile() {
     mkdir -p "$(dirname "$caddyfile")"
 
     local block
-    # Caddy path globs can't cross '/' — path restriction is enforced by wstunnel server's
-    # --restrict-http-upgrade-path-prefix flag instead. Caddy only checks WebSocket header.
+    # route{} enforces explicit handler order: reverse_proxy before respond.
+    # Without route{}, Caddy's default priority runs respond (no matcher) before reverse_proxy,
+    # causing ALL requests — including WebSocket — to get 503.
     block="${domain} {
     header -Server
     @wstunnel header Upgrade websocket
-    reverse_proxy @wstunnel localhost:${port}
-    respond \"Service Unavailable\" 503
+    route {
+        reverse_proxy @wstunnel localhost:${port}
+        respond \"Service Unavailable\" 503
+    }
 }"
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
@@ -266,8 +269,10 @@ while i < len(lines):
             f"{domain} {{",
             "    header -Server",
             "    @wstunnel header Upgrade websocket",
-            f"    reverse_proxy @wstunnel localhost:{port}",
-            '    respond "Service Unavailable" 503',
+            "    route {",
+            f"        reverse_proxy @wstunnel localhost:{port}",
+            '        respond "Service Unavailable" 503',
+            "    }",
             "}"
         ])
         replaced = True
@@ -279,8 +284,10 @@ if not replaced:
         "", f"{domain} {{",
         "    header -Server",
         "    @wstunnel header Upgrade websocket",
-        f"    reverse_proxy @wstunnel localhost:{port}",
-        '    respond "Service Unavailable" 503',
+        "    route {",
+        f"        reverse_proxy @wstunnel localhost:{port}",
+        '        respond "Service Unavailable" 503',
+        "    }",
         "}"
     ])
 output = '\n'.join(result)
