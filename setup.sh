@@ -911,18 +911,32 @@ diagnose_client() {
     fi
 
     # 4. HTTPS reachability to Iran VPS
+    # Note: curl writes "000" to stdout even on timeout/error AND exits nonzero.
+    # Using || echo "000" would double it to "000000", so we suppress exit code via || true.
     local http_code caddy_broken=false wstunnel_rejecting=false
     http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
         --max-time 6 \
-        "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null || echo "000")
+        "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null) || true
+    http_code="${http_code:-000}"
+    # wstunnel rejects plain HTTP with connection-close (no response body) → curl gives 000.
+    # Treat this as "reachable but wstunnel-only" — not the same as truly unreachable.
+    local https_reachable=false
     case "$http_code" in
         "000")
-            check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (timeout/refused)"
-            echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
-            echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
-            echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            # Distinguish timeout from connection-refused:
+            # Try a fast TCP connect to see if the port is at least open.
+            if timeout 4 bash -c "echo >/dev/tcp/${PARSED_DOMAIN}/${PARSED_WSS_PORT}" 2>/dev/null; then
+                https_reachable=true
+                check_ok "Iran VPS port ${PARSED_WSS_PORT} is open (wstunnel doesn't respond to plain HTTP — normal)"
+            else
+                check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (port closed or timeout)"
+                echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
+                echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
+                echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            fi
             ;;
         "400")
+            https_reachable=true
             check_fail "Iran VPS returns 400 — wstunnel is rejecting the WebSocket upgrade"
             echo -e "         ${RED}Most likely: --restrict-to or --restrict-http-upgrade-path-prefix flag on Iran VPS${RESET}"
             echo -e "         ${YELLOW}→ On Iran VPS remove --restrict-to:${RESET}"
@@ -933,6 +947,7 @@ diagnose_client() {
             wstunnel_rejecting=true
             ;;
         "404")
+            https_reachable=true
             check_fail "Iran VPS returns 404 — Caddyfile is misconfigured or has 'respond 404'"
             echo -e "         ${RED}Caddy is running but blocking WebSocket connections!${RESET}"
             echo -e "         ${YELLOW}→ On Iran VPS fix Caddyfile:${RESET}"
@@ -941,6 +956,7 @@ diagnose_client() {
             caddy_broken=true
             ;;
         *)
+            https_reachable=true
             check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
             ;;
     esac
