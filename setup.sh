@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh"
+WS_BIN="/usr/local/bin/ws"
+
 # ─────────────────────────────────────────────
 # Colors
 # ─────────────────────────────────────────────
@@ -1035,6 +1038,9 @@ flow_server() {
     echo -e "  Caddyfile:      ${CYAN}/etc/caddy/Caddyfile${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
+    echo ""
+    echo -e "${BOLD}─── ws command ────────────────────────────────────────${RESET}"
+    install_ws_command
     success "Iran VPS (server) setup complete."
 }
 
@@ -1135,6 +1141,9 @@ flow_client() {
     echo -e "  ${BOLD}3. Run Diagnose (option 3) to verify everything is working.${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
+    echo ""
+    echo -e "${BOLD}─── ws command ────────────────────────────────────────${RESET}"
+    install_ws_command
     success "Foreign VPS (client) setup complete."
 }
 
@@ -1473,57 +1482,137 @@ flow_edit() {
     fi
 }
 
+# Install / refresh the `ws` shortcut in /usr/local/bin/ws
+install_ws_command() {
+    info "Installing 'ws' command shortcut..."
+    cat > "$WS_BIN" <<'WSEOF'
+#!/bin/bash
+exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh") "$@"
+WSEOF
+    chmod +x "$WS_BIN"
+    success "Shortcut installed: type 'ws' from anywhere to launch this script."
+}
+
+# Update Caddy binary to the latest pinned version
+update_caddy_binary() {
+    local cbin; cbin=$(caddy_bin)
+    if [ -z "$cbin" ]; then
+        warn "Caddy not found — skipping Caddy update."
+        return
+    fi
+    local cur_ver; cur_ver=$("$cbin" version 2>/dev/null | awk '{print $1}' | sed 's/^v//' || echo "unknown")
+    info "Current Caddy version: ${cur_ver}  [${cbin}]"
+    local arch; arch=$(uname -m)
+    case "$arch" in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        armv7l)  arch="armv7" ;;
+        *)       warn "Unsupported arch for Caddy update: ${arch}"; return ;;
+    esac
+    local ver="2.9.1"
+    local url="https://github.com/caddyserver/caddy/releases/download/v${ver}/caddy_${ver}_linux_${arch}.tar.gz"
+    info "Downloading Caddy v${ver}..."
+    curl -fsSL "$url" -o /tmp/caddy.tar.gz
+    tar -xzf /tmp/caddy.tar.gz -C /tmp caddy
+    mv /tmp/caddy "$cbin"
+    chmod +x "$cbin"
+    rm -f /tmp/caddy.tar.gz
+    success "Caddy updated to v${ver}  [${cbin}]"
+    systemctl reload caddy 2>/dev/null && info "Caddy reloaded." || true
+}
+
 # ─────────────────────────────────────────────
 # Update
 # ─────────────────────────────────────────────
 flow_update() {
     echo ""
-    local bin
-    bin=$(wstunnel_bin)
-    if [ -n "$bin" ]; then
-        info "Current version: $("$bin" --version 2>&1 | head -n1)  [$bin]"
+
+    # ── current state ────────────────────────────
+    local wbin; wbin=$(wstunnel_bin)
+    if [ -n "$wbin" ]; then
+        info "wstunnel  : $("$wbin" --version 2>&1 | head -n1)  [${wbin}]"
     else
         warn "wstunnel binary not found — will install fresh."
+    fi
+
+    local cbin; cbin=$(caddy_bin)
+    if [ -n "$cbin" ]; then
+        info "Caddy     : $("$cbin" version 2>/dev/null | head -n1)  [${cbin}]"
+    else
+        info "Caddy     : not installed on this machine."
+    fi
+
+    local script_date=""
+    if [ -f "$WS_BIN" ]; then
+        script_date=$(date -r "$WS_BIN" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+        info "ws script : installed  (last updated ${script_date})  [${WS_BIN}]"
+    else
+        info "ws script : not installed yet."
     fi
 
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
     if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
-        echo -e "  Services found:"
+        echo ""
+        echo -e "  Services:"
         for svc in "${FOUND_SVCS[@]}"; do
             local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
             echo -e "    ${CYAN}${svc}${RESET}  [${st}]"
         done
-    else
-        warn "No service files found — binary will be updated but no services to restart."
     fi
 
     echo ""
-    ask NEW_VERSION "Version to upgrade to" "10.5.5"
+    ask NEW_VERSION "wstunnel version to install" "10.5.5"
     echo ""
-    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Summary  ━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "  Action         :  ${GREEN}Update wstunnel binary${RESET}"
-    echo -e "  Target version :  ${YELLOW}${NEW_VERSION}${RESET}"
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Will update  ━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
+    [ -n "$cbin" ] && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
+    echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     confirm "Proceed with update?" || { info "Aborted."; exit 0; }
     echo ""
 
+    # ── 1. stop services ────────────────────────
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
         info "Stopping ${svc} ..."
         systemctl stop "$svc" || true
     done
 
+    # ── 2. update wstunnel ──────────────────────
+    echo ""
+    echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
     install_wstunnel_binary "$NEW_VERSION"
 
+    # ── 3. update Caddy ─────────────────────────
+    if [ -n "$cbin" ]; then
+        echo ""
+        echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
+        update_caddy_binary
+    fi
+
+    # ── 4. update ws script ─────────────────────
+    echo ""
+    echo -e "${BOLD}─── Script (ws command) ───────────────────────────────${RESET}"
+    install_ws_command
+
+    # ── 5. restart services ──────────────────────
+    echo ""
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
         info "Restarting ${svc} ..."
         systemctl start "$svc"
         systemctl status "$svc" --no-pager
         echo ""
     done
-    success "Update complete: $(/usr/local/bin/wstunnel --version 2>&1 | head -n1)"
+
+    echo ""
+    success "All components updated successfully."
+    local wb; wb=$(wstunnel_bin)
+    local cb; cb=$(caddy_bin)
+    [ -n "$wb" ] && info "  wstunnel : $("$wb" --version 2>&1 | head -n1)"
+    [ -n "$cb" ] && info "  Caddy    : $("$cb" version 2>/dev/null | head -n1)"
+    info "  ws       : ${WS_BIN}  (type 'ws' to relaunch)"
 }
 
 # ─────────────────────────────────────────────
