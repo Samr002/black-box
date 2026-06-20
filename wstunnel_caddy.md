@@ -1,4 +1,13 @@
-# WStunnel Setup Guide
+# WStunnel Setup Guide — Manual Reference
+
+> **Note:** The interactive script in this repo handles all of the steps below automatically.
+> Use the script for new setups — this document is kept as a low-level reference only.
+>
+> ```bash
+> bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)
+> ```
+
+---
 
 Setup WebSocket tunnels between Iran VPS (server) and Foreign VPS (client). Domain `tunnel.yourdomain.com` must point to Iran VPS IP.
 
