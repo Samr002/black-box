@@ -23,6 +23,20 @@ success()    { echo -e "${GREEN}[OK]${RESET}    $*"; }
 warn()       { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
 error()      { echo -e "${RED}[ERROR]${RESET} $*"; exit 1; }
 check_ok()   { echo -e "  ${GREEN}[✓]${RESET} $*"; }
+
+_show_header() {
+    clear
+    echo ""
+    echo -e "${BOLD}╔═════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${BOLD}║         WStunnel + Caddy — Interactive Setup        ║${RESET}"
+    echo -e "${BOLD}╚═════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+}
+
+_press_enter() {
+    echo ""
+    read -rp "$(echo -e "  ${BOLD}Press Enter to return to main menu...${RESET}")"
+}
 check_fail() { echo -e "  ${RED}[✗]${RESET} $*"; }
 check_warn() { echo -e "  ${YELLOW}[!]${RESET} $*"; }
 
@@ -1006,14 +1020,16 @@ flow_diagnose() {
         echo ""
         echo -e "  ${CYAN}1${RESET}) Iran VPS   — server (wstunnel server + Caddy)"
         echo -e "  ${CYAN}2${RESET}) Foreign VPS — client (wstunnel client, VPN service)"
+        echo -e "  ${CYAN}3${RESET}) Back to main menu"
         echo ""
         local ch
         while true; do
-            read -rp "$(echo -e "  ${BOLD}Enter 1 or 2${RESET}: ")" ch
+            read -rp "$(echo -e "  ${BOLD}Enter 1-3${RESET}: ")" ch
             case "$ch" in
                 1) diagnose_server; return ;;
                 2) diagnose_client; return ;;
-                *) warn "Please enter 1 or 2." ;;
+                3) return ;;
+                *) warn "Please enter 1, 2 or 3." ;;
             esac
         done
     fi
@@ -1070,7 +1086,7 @@ flow_server() {
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
-    confirm "Proceed with server installation?" || { info "Aborted."; exit 0; }
+    confirm "Proceed with server installation?" || { info "Aborted."; return; }
     echo ""
 
     # ── ۱. نصب wstunnel ────────────────────────────────
@@ -1181,7 +1197,7 @@ flow_client() {
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
 
-    confirm "Proceed with client installation?" || { info "Aborted."; exit 0; }
+    confirm "Proceed with client installation?" || { info "Aborted."; return; }
     echo ""
 
     install_wstunnel_binary "$WSTUNNEL_VERSION"
@@ -1244,7 +1260,7 @@ edit_server() {
         echo -e "  ${CYAN}3${RESET}) Change bind IP / port"
         echo -e "  ${CYAN}4${RESET}) Configure scheduled restart"
         echo -e "  ${CYAN}5${RESET}) Apply changes"
-        echo -e "  ${CYAN}6${RESET}) Cancel"
+        echo -e "  ${CYAN}6${RESET}) Back to main menu"
         echo ""
 
         local choice
@@ -1376,7 +1392,7 @@ edit_client() {
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
         echo -e "  ${CYAN}5${RESET}) Configure scheduled restart"
         echo -e "  ${CYAN}6${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}7${RESET}) Cancel (discard all changes)"
+        echo -e "  ${CYAN}7${RESET}) Back to main menu (discard changes)"
         echo ""
 
         local choice
@@ -1522,14 +1538,16 @@ flow_edit() {
         echo ""
         echo -e "  ${CYAN}1${RESET}) Iran VPS    — server (bind IP / wstunnel port)"
         echo -e "  ${CYAN}2${RESET}) Foreign VPS  — client (tunnel ports + domain)"
+        echo -e "  ${CYAN}3${RESET}) Back to main menu"
         echo ""
         local ch
         while true; do
-            read -rp "$(echo -e "  ${BOLD}Enter 1 or 2${RESET}: ")" ch
+            read -rp "$(echo -e "  ${BOLD}Enter 1-3${RESET}: ")" ch
             case "$ch" in
                 1) edit_server; return ;;
                 2) edit_client; return ;;
-                *) warn "Please enter 1 or 2." ;;
+                3) return ;;
+                *) warn "Please enter 1, 2 or 3." ;;
             esac
         done
     fi
@@ -1540,14 +1558,16 @@ flow_edit() {
         echo ""
         echo -e "  ${CYAN}1${RESET}) Iran VPS   — wstunnel-server (bind IP / port)"
         echo -e "  ${CYAN}2${RESET}) Foreign VPS — wstunnel-client (ports + domain)"
+        echo -e "  ${CYAN}3${RESET}) Back to main menu"
         echo ""
         local sc
         while true; do
-            read -rp "$(echo -e "  ${BOLD}Enter 1 or 2${RESET}: ")" sc
+            read -rp "$(echo -e "  ${BOLD}Enter 1-3${RESET}: ")" sc
             case "$sc" in
                 1) edit_server; return ;;
                 2) edit_client; return ;;
-                *) warn "Please enter 1 or 2." ;;
+                3) return ;;
+                *) warn "Please enter 1, 2 or 3." ;;
             esac
         done
     elif $has_server; then edit_server
@@ -1780,7 +1800,7 @@ flow_uninstall() {
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $wstunnel_bin_exists && ! $wstunnel_user_exists \
         && ! $caddy_ours_binary && ! $caddy_ours_apt \
         && ! $server_timer_exists && ! $client_timer_exists; then
-        info "Nothing to remove — wstunnel is not installed on this machine."; exit 0
+        info "Nothing to remove — wstunnel is not installed on this machine."; return
     fi
 
     # ── Preview ─────────────────────────────────
@@ -1813,7 +1833,7 @@ flow_uninstall() {
     echo ""
     echo -e "  ${RED}All items above will be permanently removed.${RESET}"
     echo ""
-    confirm "Are you sure?" || { info "Aborted."; exit 0; }
+    confirm "Are you sure?" || { info "Aborted."; return; }
     echo ""
 
     # ── 1. wstunnel services ────────────────────
@@ -1935,30 +1955,28 @@ PYEOF
 # Entry point
 # ─────────────────────────────────────────────
 main() {
-    clear
-    echo ""
-    echo -e "${BOLD}╔═════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${BOLD}║         WStunnel + Caddy — Interactive Setup        ║${RESET}"
-    echo -e "${BOLD}╚═════════════════════════════════════════════════════╝${RESET}"
-    echo ""
-    echo -e "  Quick install:"
-    echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)${RESET}"
-    echo ""
-
     check_root
+    _show_header
 
-    echo -e "${BOLD}What would you like to do?${RESET}"
-    echo ""
-    pick_action ACTION
+    while true; do
+        echo -e "  Quick install:"
+        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)${RESET}"
+        echo ""
+        echo -e "${BOLD}What would you like to do?${RESET}"
+        echo ""
+        pick_action ACTION
 
-    case "$ACTION" in
-        server)    flow_server    ;;
-        client)    flow_client    ;;
-        diagnose)  flow_diagnose  ;;
-        edit)      flow_edit      ;;
-        update)    flow_update    ;;
-        uninstall) flow_uninstall ;;
-    esac
+        case "$ACTION" in
+            server)    flow_server;    _press_enter ;;
+            client)    flow_client;    _press_enter ;;
+            diagnose)  flow_diagnose;  _press_enter ;;
+            edit)      flow_edit ;;
+            update)    flow_update;    _press_enter ;;
+            uninstall) flow_uninstall; exit 0 ;;
+        esac
+
+        _show_header
+    done
 }
 
 main "$@"
