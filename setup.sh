@@ -1830,6 +1830,10 @@ flow_uninstall() {
     [ -f "/etc/systemd/system/wstunnel-server-restart.timer" ] && server_timer_exists=true
     [ -f "/etc/systemd/system/wstunnel-client-restart.timer" ] && client_timer_exists=true
 
+    # ── ws shortcut detection ───────────────────
+    local ws_shortcut_exists=false
+    [ -f "$WS_BIN" ] && ws_shortcut_exists=true
+
     # Detect if this is an Iran VPS (server) install
     local has_server=false
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
@@ -1861,7 +1865,8 @@ flow_uninstall() {
     # ── Nothing to do? ──────────────────────────
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $wstunnel_bin_exists && ! $wstunnel_user_exists \
         && ! $caddy_ours_binary && ! $caddy_ours_apt \
-        && ! $server_timer_exists && ! $client_timer_exists; then
+        && ! $server_timer_exists && ! $client_timer_exists \
+        && ! $ws_shortcut_exists; then
         info "Nothing to remove — wstunnel is not installed on this machine."; return
     fi
 
@@ -1876,6 +1881,7 @@ flow_uninstall() {
     $wstunnel_user_exists && echo -e "  ${CYAN}wstunnel user${RESET}     wstunnel  +  /home/wstunnel/"
     $server_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-server-restart.{timer,service}"
     $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
+    $ws_shortcut_exists   && echo -e "  ${CYAN}ws shortcut${RESET}       ${WS_BIN}"
 
     if $caddy_ours_binary; then
         local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
@@ -1886,7 +1892,8 @@ flow_uninstall() {
     elif $caddy_ours_apt; then
         local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
         echo -e "  ${CYAN}Caddy package${RESET}     caddy (apt remove --purge)  [${cst}]"
-        echo -e "  ${CYAN}Caddy config${RESET}      /etc/caddy/"
+        echo -e "  ${CYAN}Caddy config${RESET}      /etc/caddy/  /var/lib/caddy/  /var/log/caddy/"
+        echo -e "  ${CYAN}Caddy user${RESET}        caddy (user + group)"
         echo -e "  ${CYAN}Caddy apt repo${RESET}    /etc/apt/sources.list.d/caddy-stable.list"
         echo -e "  ${CYAN}              ${RESET}    /usr/share/keyrings/caddy-stable-archive-keyring.gpg"
     elif $caddy_preexisting; then
@@ -1932,7 +1939,13 @@ flow_uninstall() {
         apt-get autoremove -y 2>/dev/null || true
         rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
               /etc/apt/sources.list.d/caddy-stable.list
-        rm -rf /etc/caddy
+        rm -rf /etc/caddy /var/lib/caddy /var/log/caddy
+        if id caddy &>/dev/null; then
+            userdel caddy 2>/dev/null || true
+        fi
+        if getent group caddy &>/dev/null; then
+            groupdel caddy 2>/dev/null || true
+        fi
         success "Caddy removed via apt."
 
     elif $caddy_preexisting; then
@@ -2007,6 +2020,12 @@ PYEOF
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
         success "Removed user 'wstunnel' and /home/wstunnel/"
+    fi
+
+    # ── 7. ws shortcut ──────────────────────────
+    if $ws_shortcut_exists; then
+        rm -f "$WS_BIN"
+        success "Removed ${WS_BIN}"
     fi
 
     echo ""
