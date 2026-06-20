@@ -696,7 +696,52 @@ diagnose_server() {
         echo -e "         ${YELLOW}→ Run Install (option 1) to install Caddy automatically${RESET}"
     fi
 
-    # 7. Firewall — check if common tools exist and show status
+    # 7. Multi-domain DNS check
+    parse_server_domains
+    echo ""
+    echo -e "  ${BOLD}Configured Domains (${#PARSED_DOMAINS[@]}):${RESET}"
+    if [ ${#PARSED_DOMAINS[@]} -eq 0 ]; then
+        check_warn "No domains found in Caddyfile routing to localhost:${PARSED_BIND_PORT}"
+        echo -e "         ${YELLOW}→ Run Install or Edit → Add domain to configure${RESET}"
+    else
+        for _dom in "${PARSED_DOMAINS[@]}"; do
+            local _ip=""
+            if _ip=$(getent hosts "$_dom" 2>/dev/null | awk '{print $1}' | head -1) && [ -n "$_ip" ]; then
+                check_ok "DNS: ${_dom}  →  ${_ip}"
+            else
+                check_fail "DNS: ${_dom}  →  cannot resolve (A record missing or not propagated)"
+                echo -e "         ${YELLOW}→ Point ${_dom} A record to this server's IP${RESET}"
+            fi
+        done
+    fi
+
+    # 8. Restart timer
+    echo ""
+    echo -e "  ${BOLD}Scheduled Restart Timer:${RESET}"
+    local _srv_h; _srv_h=$(get_restart_interval "server")
+    if [ "$_srv_h" != "0" ]; then
+        if systemctl is-active "wstunnel-server-restart.timer" &>/dev/null; then
+            local _next; _next=$(systemctl list-timers "wstunnel-server-restart.timer" --no-pager 2>/dev/null \
+                | awk 'NR==2 {print $1, $2}' || echo "unknown")
+            check_ok "Timer active — restarts every ${_srv_h}h  (next: ${_next})"
+        else
+            check_warn "Timer configured (${_srv_h}h) but NOT active"
+            echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-server-restart.timer${RESET}"
+        fi
+    else
+        check_warn "No scheduled restart timer — consider enabling via Edit → option 4"
+    fi
+
+    # 9. ws shortcut
+    echo ""
+    echo -e "  ${BOLD}ws Command:${RESET}"
+    if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
+        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
+    else
+        check_warn "'ws' shortcut not found — run Update (option 5) to install it"
+    fi
+
+    # 10. Firewall — check if common tools exist and show status
     echo ""
     echo -e "  ${BOLD}Firewall:${RESET}"
     if command -v ufw &>/dev/null; then
@@ -712,7 +757,7 @@ diagnose_server() {
         check_warn "No firewall tool detected (ufw/iptables)"
     fi
 
-    # 8. بررسی مستقیم service file برای --restrict-to
+    # 11. بررسی مستقیم service file برای --restrict-to
     local svc_file="/etc/systemd/system/wstunnel-server.service"
     if [ -f "$svc_file" ] && grep -q -- '--restrict-to' "$svc_file"; then
         check_fail "--restrict-to found in service file — this BLOCKS all reverse tunnel (-R) connections"
@@ -863,14 +908,40 @@ diagnose_client() {
         fi
     done
 
-    # 7. Recent logs
+    # 7. Restart timer
+    echo ""
+    echo -e "  ${BOLD}Scheduled Restart Timer:${RESET}"
+    local _cli_h; _cli_h=$(get_restart_interval "client")
+    if [ "$_cli_h" != "0" ]; then
+        if systemctl is-active "wstunnel-client-restart.timer" &>/dev/null; then
+            local _cnext; _cnext=$(systemctl list-timers "wstunnel-client-restart.timer" --no-pager 2>/dev/null \
+                | awk 'NR==2 {print $1, $2}' || echo "unknown")
+            check_ok "Timer active — restarts every ${_cli_h}h  (next: ${_cnext})"
+        else
+            check_warn "Timer configured (${_cli_h}h) but NOT active"
+            echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-client-restart.timer${RESET}"
+        fi
+    else
+        check_warn "No scheduled restart timer — consider enabling via Edit → option 5"
+    fi
+
+    # 8. ws shortcut
+    echo ""
+    echo -e "  ${BOLD}ws Command:${RESET}"
+    if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
+        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
+    else
+        check_warn "'ws' shortcut not found — run Update (option 5) to install it"
+    fi
+
+    # 9. Recent logs
     echo ""
     echo -e "  ${BOLD}Last 20 log lines:${RESET}"
     journalctl -u wstunnel-client.service -n 20 --no-pager 2>/dev/null \
         | sed 's/^/    /' \
         || echo -e "    ${YELLOW}(no logs available)${RESET}"
 
-    # 8. Summary verdict
+    # 10. Summary verdict
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━  Verdict  ━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     if $caddy_broken; then
