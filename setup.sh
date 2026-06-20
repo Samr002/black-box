@@ -232,19 +232,18 @@ configure_caddyfile() {
 
     local block
     if [ -n "$secret_path" ]; then
+        # secret path is random — path alone is sufficient as the matcher
         block="${domain} {
     header -Server
-    @wstunnel {
-        header Connection *Upgrade*
-        path_regexp ^${secret_path}
-    }
+    @wstunnel path_regexp ^${secret_path}
     reverse_proxy @wstunnel localhost:${port}
     respond \"Service Unavailable\" 503
 }"
     else
+        # no secret path — match on WebSocket Upgrade header
         block="${domain} {
     header -Server
-    @wstunnel header Connection *Upgrade*
+    @wstunnel header Upgrade websocket
     reverse_proxy @wstunnel localhost:${port}
     respond \"Service Unavailable\" 503
 }"
@@ -276,10 +275,7 @@ while i < len(lines):
             result.extend([
                 f"{domain} {{",
                 "    header -Server",
-                "    @wstunnel {",
-                "        header Connection *Upgrade*",
-                f"        path_regexp ^{secret_path}",
-                "    }",
+                f"    @wstunnel path_regexp ^{secret_path}",
                 f"    reverse_proxy @wstunnel localhost:{port}",
                 '    respond "Service Unavailable" 503',
                 "}"
@@ -288,7 +284,7 @@ while i < len(lines):
             result.extend([
                 f"{domain} {{",
                 "    header -Server",
-                "    @wstunnel header Connection *Upgrade*",
+                "    @wstunnel header Upgrade websocket",
                 f"    reverse_proxy @wstunnel localhost:{port}",
                 '    respond "Service Unavailable" 503',
                 "}"
@@ -302,10 +298,7 @@ if not replaced:
         result.extend([
             "", f"{domain} {{",
             "    header -Server",
-            "    @wstunnel {",
-            "        header Connection *Upgrade*",
-            f"        path_regexp ^{secret_path}",
-            "    }",
+            f"    @wstunnel path_regexp ^{secret_path}",
             f"    reverse_proxy @wstunnel localhost:{port}",
             '    respond "Service Unavailable" 503',
             "}"
@@ -314,7 +307,7 @@ if not replaced:
         result.extend([
             "", f"{domain} {{",
             "    header -Server",
-            "    @wstunnel header Connection *Upgrade*",
+            "    @wstunnel header Upgrade websocket",
             f"    reverse_proxy @wstunnel localhost:{port}",
             '    respond "Service Unavailable" 503',
             "}"
