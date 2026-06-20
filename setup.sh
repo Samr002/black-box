@@ -1635,57 +1635,99 @@ flow_update() {
         done
     fi
 
+    # ── per-component selection ──────────────────
     echo ""
-    ask NEW_VERSION "wstunnel version to install" "10.5.5"
+    echo -e "${BOLD}─── Select what to update ─────────────────────────────${RESET}"
+
+    local do_wstunnel=false NEW_VERSION="10.5.5"
+    echo ""
+    echo -e "  ${BOLD}wstunnel${RESET}  (current: $([ -n "$wbin" ] && "$wbin" --version 2>&1 | head -n1 || echo 'not installed'))"
+    if confirm "  Update wstunnel?"; then
+        do_wstunnel=true
+        ask NEW_VERSION "  Target version" "10.5.5"
+    fi
+
+    local do_caddy=false
+    if [ -n "$cbin" ]; then
+        echo ""
+        echo -e "  ${BOLD}Caddy${RESET}     (current: $("$cbin" version 2>/dev/null | head -n1))"
+        confirm "  Update Caddy?" && do_caddy=true
+    fi
+
+    local do_script=false
+    echo ""
+    if [ -f "$WS_BIN" ]; then
+        local script_date; script_date=$(date -r "$WS_BIN" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "unknown")
+        echo -e "  ${BOLD}ws script${RESET} (last updated: ${script_date})"
+    else
+        echo -e "  ${BOLD}ws script${RESET} (not installed yet)"
+    fi
+    confirm "  Update ws script from GitHub?" && do_script=true
+
+    if ! $do_wstunnel && ! $do_caddy && ! $do_script; then
+        echo ""
+        info "Nothing selected — no changes made."
+        return
+    fi
+
+    # ── summary ──────────────────────────────────
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Will update  ━━━━━━━━━━━━━━━━━━${RESET}"
-    echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
-    [ -n "$cbin" ] && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
-    echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
+    $do_wstunnel && echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
+    $do_caddy    && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
+    $do_script   && echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
-    confirm "Proceed with update?" || { info "Aborted."; exit 0; }
+    confirm "Proceed?" || { info "Aborted."; return; }
     echo ""
 
-    # ── 1. stop services ────────────────────────
-    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        info "Stopping ${svc} ..."
-        systemctl stop "$svc" || true
-    done
+    # ── stop services if wstunnel is being updated ──
+    if $do_wstunnel; then
+        for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+            info "Stopping ${svc} ..."
+            systemctl stop "$svc" || true
+        done
+    fi
 
-    # ── 2. update wstunnel ──────────────────────
-    echo ""
-    echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
-    install_wstunnel_binary "$NEW_VERSION"
+    # ── 1. wstunnel ─────────────────────────────
+    if $do_wstunnel; then
+        echo ""
+        echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
+        install_wstunnel_binary "$NEW_VERSION"
+    fi
 
-    # ── 3. update Caddy ─────────────────────────
-    if [ -n "$cbin" ]; then
+    # ── 2. Caddy ────────────────────────────────
+    if $do_caddy; then
         echo ""
         echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
         update_caddy_binary
     fi
 
-    # ── 4. update ws script ─────────────────────
-    echo ""
-    echo -e "${BOLD}─── Script (ws command) ───────────────────────────────${RESET}"
-    install_ws_command
-
-    # ── 5. restart services ──────────────────────
-    echo ""
-    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        info "Restarting ${svc} ..."
-        systemctl start "$svc"
-        systemctl status "$svc" --no-pager
+    # ── 3. ws script ────────────────────────────
+    if $do_script; then
         echo ""
-    done
+        echo -e "${BOLD}─── Script (ws command) ───────────────────────────────${RESET}"
+        install_ws_command
+    fi
+
+    # ── restart services if wstunnel was updated ──
+    if $do_wstunnel; then
+        echo ""
+        for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+            info "Restarting ${svc} ..."
+            systemctl start "$svc"
+            systemctl status "$svc" --no-pager
+            echo ""
+        done
+    fi
 
     echo ""
-    success "All components updated successfully."
+    success "Update complete."
     local wb; wb=$(wstunnel_bin)
     local cb; cb=$(caddy_bin)
-    [ -n "$wb" ] && info "  wstunnel : $("$wb" --version 2>&1 | head -n1)"
-    [ -n "$cb" ] && info "  Caddy    : $("$cb" version 2>/dev/null | head -n1)"
-    info "  ws       : ${WS_BIN}  (type 'ws' to relaunch)"
+    $do_wstunnel && [ -n "$wb" ] && info "  wstunnel : $("$wb" --version 2>&1 | head -n1)"
+    $do_caddy    && [ -n "$cb" ] && info "  Caddy    : $("$cb" version 2>/dev/null | head -n1)"
+    $do_script   && info "  ws       : ${WS_BIN}  (type 'ws' to relaunch)"
 }
 
 # ─────────────────────────────────────────────
