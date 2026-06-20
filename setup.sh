@@ -225,22 +225,15 @@ CADDY_SVC
 
 # نوشتن یا به‌روز‌رسانی بلاک دامنه در Caddyfile
 configure_caddyfile() {
-    local domain="$1" port="$2" secret_path="${3:-}"
+    local domain="$1" port="$2"
     local caddyfile="/etc/caddy/Caddyfile"
 
     mkdir -p "$(dirname "$caddyfile")"
 
     local block
-    # route{} enforces explicit handler order: reverse_proxy before respond.
-    # Without route{}, Caddy's default priority runs respond (no matcher) before reverse_proxy,
-    # causing ALL requests — including WebSocket — to get 503.
     block="${domain} {
     header -Server
-    @wstunnel header Upgrade websocket
-    route {
-        reverse_proxy @wstunnel localhost:${port}
-        respond \"Service Unavailable\" 503
-    }
+    reverse_proxy localhost:${port}
 }"
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
@@ -248,9 +241,9 @@ configure_caddyfile() {
         success "Caddyfile created with domain ${domain}."
     elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
         info "Updating ${domain} in Caddyfile..."
-        python3 - "$caddyfile" "$domain" "$port" "$secret_path" <<'PYEOF'
+        python3 - "$caddyfile" "$domain" "$port" <<'PYEOF'
 import sys, re
-path, domain, port, secret_path = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     content = f.read()
 lines = content.split('\n')
@@ -268,11 +261,7 @@ while i < len(lines):
         result.extend([
             f"{domain} {{",
             "    header -Server",
-            "    @wstunnel header Upgrade websocket",
-            "    route {",
-            f"        reverse_proxy @wstunnel localhost:{port}",
-            '        respond "Service Unavailable" 503',
-            "    }",
+            f"    reverse_proxy localhost:{port}",
             "}"
         ])
         replaced = True
@@ -283,11 +272,7 @@ if not replaced:
     result.extend([
         "", f"{domain} {{",
         "    header -Server",
-        "    @wstunnel header Upgrade websocket",
-        "    route {",
-        f"        reverse_proxy @wstunnel localhost:{port}",
-        '        respond "Service Unavailable" 503',
-        "    }",
+        f"    reverse_proxy localhost:{port}",
         "}"
     ])
 output = '\n'.join(result)
@@ -474,11 +459,6 @@ PYEOF
 # ─────────────────────────────────────────────
 show_client_state() {
     echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${RESET}"
-    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-        echo -e "  ${BOLD}Secret path     :${RESET}  ${GREEN}${PARSED_SECRET_PATH}${RESET}"
-    else
-        echo -e "  ${BOLD}Secret path     :${RESET}  ${YELLOW}none${RESET}"
-    fi
     echo ""
     echo -e "  ${BOLD}Port mappings:${RESET}"
     if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
@@ -498,11 +478,6 @@ show_client_state() {
 
 show_server_state() {
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
-    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-        echo -e "  ${BOLD}Secret path      :${RESET}  ${GREEN}${PARSED_SECRET_PATH}  (DPI protection active)${RESET}"
-    else
-        echo -e "  ${BOLD}Secret path      :${RESET}  ${YELLOW}none  (all WebSocket connections accepted)${RESET}"
-    fi
     echo ""
     echo -e "  ${BOLD}Domains (Caddyfile):${RESET}"
     if [ ${#PARSED_DOMAINS[@]} -eq 0 ]; then
@@ -518,9 +493,6 @@ build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec ${PARSED_PING_FREQ:-60}"
     result+=" --connection-min-idle ${PARSED_MIN_IDLE:-1}"
-    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-        result+=" --http-upgrade-path-prefix ${PARSED_SECRET_PATH}"
-    fi
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
@@ -567,9 +539,6 @@ EOF
 
 write_server_service() {
     local exec_flags="--websocket-ping-frequency-sec ${PARSED_PING_FREQ:-60}"
-    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-        exec_flags+=" --restrict-http-upgrade-path-prefix ${PARSED_SECRET_PATH}"
-    fi
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -1227,29 +1196,8 @@ flow_server() {
         echo ""
     done
 
-    echo ""
-    echo -e "${BOLD}─── DPI Resistance ────────────────────────────────────${RESET}"
-    echo -e "  Enabling a ${BOLD}secret path prefix${RESET} means only clients that know the path"
-    echo -e "  can connect. DPI scanners and bots get a fake 503 response."
-    echo ""
     PARSED_SECRET_PATH=""
     PARSED_PING_FREQ="60"
-    if confirm "Enable secret path prefix? (recommended)"; then
-        local _gen_path
-        _gen_path="/$(head -c 6 /dev/urandom | base64 | tr -d '/+=' | head -c 8)/"
-        echo ""
-        echo -e "  Generated: ${CYAN}${_gen_path}${RESET}"
-        echo -e "  ${YELLOW}All Foreign VPS clients must use this exact path.${RESET}"
-        echo ""
-        if confirm "Use this generated path? (no = enter custom)"; then
-            PARSED_SECRET_PATH="$_gen_path"
-        else
-            ask PARSED_SECRET_PATH "Custom secret path (e.g. /mysecret/)" "$_gen_path"
-            [[ "$PARSED_SECRET_PATH" != /* ]] && PARSED_SECRET_PATH="/${PARSED_SECRET_PATH}"
-            [[ "$PARSED_SECRET_PATH" != */ ]] && PARSED_SECRET_PATH="${PARSED_SECRET_PATH}/"
-        fi
-        success "Secret path: ${PARSED_SECRET_PATH}"
-    fi
 
     echo ""
     echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
@@ -1285,7 +1233,7 @@ flow_server() {
     echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
     install_caddy
     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-        configure_caddyfile "$dom" "$PARSED_BIND_PORT" "${PARSED_SECRET_PATH:-}"
+        configure_caddyfile "$dom" "$PARSED_BIND_PORT"
     done
 
     info "Enabling and starting Caddy..."
@@ -1312,11 +1260,7 @@ flow_server() {
     echo -e "  Caddy logs:     ${CYAN}sudo journalctl -u caddy -f${RESET}"
     echo -e "  Caddyfile:      ${CYAN}/etc/caddy/Caddyfile${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-        echo ""
-        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━  SECRET PATH — KEEP THIS  ━━━━━━━━━━━━━${RESET}"
-        echo -e "  ${GREEN}${PARSED_SECRET_PATH}${RESET}"
-        echo -e "  ${YELLOW}Enter this on every Foreign VPS client during setup.${RESET}"
+    if false; then
         echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     fi
     echo ""
@@ -1339,20 +1283,9 @@ flow_client() {
     ask PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)" ""
     ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
 
-    echo ""
-    echo -e "${BOLD}─── DPI Resistance ────────────────────────────────────${RESET}"
-    echo -e "  If the Iran VPS server was set up with a secret path prefix, enter it"
-    echo -e "  here. Leave blank if no secret path was configured on the server."
-    echo ""
     PARSED_SECRET_PATH=""
     PARSED_PING_FREQ="60"
     PARSED_MIN_IDLE="1"
-    ask PARSED_SECRET_PATH "Secret path from Iran VPS server (blank = none)" ""
-    if [ -n "$PARSED_SECRET_PATH" ]; then
-        [[ "$PARSED_SECRET_PATH" != /* ]] && PARSED_SECRET_PATH="/${PARSED_SECRET_PATH}"
-        [[ "$PARSED_SECRET_PATH" != */ ]] && PARSED_SECRET_PATH="${PARSED_SECRET_PATH}/"
-        success "Will connect via secret path: ${PARSED_SECRET_PATH}"
-    fi
 
     echo ""
     echo -e "${BOLD}─── Port mappings ─────────────────────────────────────${RESET}"
@@ -1469,7 +1402,6 @@ edit_server() {
     parse_server_service
     parse_server_domains
     local changed=false
-    local dpi_changed=false
     local old_ip="${PARSED_BIND_IP}" old_port="${PARSED_BIND_PORT}"
     local -a DOMAINS_TO_REMOVE=()
     local -a ADDED_DOMAINS=()   # فقط دامنه‌هایی که این session اضافه شدن
@@ -1487,13 +1419,12 @@ edit_server() {
         echo -e "  ${CYAN}2${RESET}) Remove domain"
         echo -e "  ${CYAN}3${RESET}) Change bind IP / port"
         echo -e "  ${CYAN}4${RESET}) Configure scheduled restart"
-        echo -e "  ${CYAN}5${RESET}) DPI resistance settings"
-        echo -e "  ${CYAN}6${RESET}) Apply changes"
-        echo -e "  ${CYAN}7${RESET}) Back to main menu"
+        echo -e "  ${CYAN}5${RESET}) Apply changes"
+        echo -e "  ${CYAN}6${RESET}) Back to main menu"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1576,73 +1507,6 @@ edit_server() {
                 fi
                 ;;
             5)
-                echo ""
-                echo -e "  ${BOLD}Current DPI settings:${RESET}"
-                echo -e "    Secret path:    ${CYAN}${PARSED_SECRET_PATH:-none}${RESET}"
-                echo -e "    Ping interval:  ${CYAN}${PARSED_PING_FREQ:-60}s${RESET}"
-                echo ""
-                echo -e "  ${YELLOW}⚠  If you change the secret path, update ALL Foreign VPS${RESET}"
-                echo -e "  ${YELLOW}   clients BEFORE restarting the server, or they will lose connection.${RESET}"
-                echo ""
-                echo -e "  ${CYAN}1${RESET}) Change secret path"
-                echo -e "  ${CYAN}2${RESET}) Change ping interval"
-                echo -e "  ${CYAN}3${RESET}) Back"
-                echo ""
-                local dpi_choice
-                read -rp "$(echo -e "  ${BOLD}Enter 1-3${RESET}: ")" dpi_choice
-                case "$dpi_choice" in
-                    1)
-                        local _gen_path
-                        _gen_path="/$(head -c 6 /dev/urandom | base64 | tr -d '/+=' | head -c 8)/"
-                        echo ""
-                        echo -e "  ${CYAN}a${RESET}) Generate new random path: ${CYAN}${_gen_path}${RESET}"
-                        echo -e "  ${CYAN}b${RESET}) Enter custom path"
-                        echo -e "  ${CYAN}c${RESET}) Remove secret path (accept all WebSocket connections)"
-                        echo ""
-                        local ps_choice
-                        read -rp "$(echo -e "  ${BOLD}Enter a/b/c${RESET}: ")" ps_choice
-                        case "$ps_choice" in
-                            a)
-                                PARSED_SECRET_PATH="$_gen_path"
-                                changed=true; dpi_changed=true
-                                success "Secret path set: ${PARSED_SECRET_PATH}"
-                                ;;
-                            b)
-                                ask _NEW_SP "Custom path (e.g. /secret/)" "${PARSED_SECRET_PATH:-/}"
-                                [[ "$_NEW_SP" != /* ]] && _NEW_SP="/${_NEW_SP}"
-                                [[ "$_NEW_SP" != */ ]] && _NEW_SP="${_NEW_SP}/"
-                                PARSED_SECRET_PATH="$_NEW_SP"
-                                changed=true; dpi_changed=true
-                                success "Secret path set: ${PARSED_SECRET_PATH}"
-                                ;;
-                            c)
-                                if [ -n "$PARSED_SECRET_PATH" ]; then
-                                    warn "All WebSocket connections will be accepted after this change."
-                                    if confirm "Confirm removal?"; then
-                                        PARSED_SECRET_PATH=""
-                                        changed=true; dpi_changed=true
-                                        success "Secret path removed."
-                                    fi
-                                else
-                                    info "No secret path was set."
-                                fi
-                                ;;
-                        esac
-                        ;;
-                    2)
-                        ask _NEW_PING "Ping interval in seconds (20–120; higher = less fingerprint)" "${PARSED_PING_FREQ:-60}"
-                        if [ "$_NEW_PING" != "${PARSED_PING_FREQ:-60}" ]; then
-                            PARSED_PING_FREQ="$_NEW_PING"
-                            changed=true; dpi_changed=true
-                            success "Ping interval: ${PARSED_PING_FREQ}s"
-                        else
-                            info "No changes."
-                        fi
-                        ;;
-                    3) ;;
-                esac
-                ;;
-            6)
                 ! $changed && { info "No changes to apply."; continue; }
                 echo ""
                 echo -e "${BOLD}─── Changes Summary ───────────────────────────────────${RESET}"
@@ -1661,20 +1525,13 @@ edit_server() {
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     echo -e "  ${CYAN}Bind:${RESET}  ${old_ip}:${old_port}  →  ${PARSED_BIND_IP}:${PARSED_BIND_PORT}"
                 fi
-                if $dpi_changed; then
-                    echo -e "  ${CYAN}Secret path:${RESET}   ${PARSED_SECRET_PATH:-none}"
-                    echo -e "  ${CYAN}Ping interval:${RESET} ${PARSED_PING_FREQ:-60}s"
-                    if [ -n "${PARSED_SECRET_PATH:-}" ]; then
-                        echo -e "  ${YELLOW}⚠  After applying, update ALL Foreign VPS clients with this path!${RESET}"
-                    fi
-                fi
                 echo ""
                 confirm "Apply changes?" || continue
                 echo ""
 
-                # 1. wstunnel service — if bind address or DPI settings changed
+                # 1. wstunnel service — if bind address changed
                 local port_changed=false
-                if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ] || $dpi_changed; then
+                if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     write_server_service
                     [ "${PARSED_BIND_PORT}" != "${old_port}" ] && port_changed=true
                 fi
@@ -1684,16 +1541,14 @@ edit_server() {
                     remove_caddyfile_domain "$dom"
                 done
 
-                # 3. Configure domains
-                # port or DPI changed → update ALL remaining domains
-                # otherwise → only newly added domains
-                if $port_changed || $dpi_changed; then
+                # 3. Configure domains — if port changed update all, else only new
+                if $port_changed; then
                     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_SECRET_PATH:-}"
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
                     done
                 else
                     for dom in "${ADDED_DOMAINS[@]+"${ADDED_DOMAINS[@]}"}"; do
-                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_SECRET_PATH:-}"
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
                     done
                 fi
 
@@ -1712,20 +1567,12 @@ edit_server() {
                 else
                     warn "Caddy binary not found — reload manually: systemctl reload caddy"
                 fi
-                if $dpi_changed && [ -n "${PARSED_SECRET_PATH:-}" ]; then
-                    echo ""
-                    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━  IMPORTANT  ━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-                    echo -e "  ${YELLOW}Secret path active: ${GREEN}${PARSED_SECRET_PATH}${RESET}"
-                    echo -e "  ${RED}All Foreign VPS clients must be updated to use this path.${RESET}"
-                    echo -e "  On each Foreign VPS: Edit Client → option 6 (DPI settings)"
-                    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-                fi
                 return
                 ;;
-            7)
+            6)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 7." ;;
+                warn "Please enter a number between 1 and 6." ;;
         esac
     done
 }
@@ -1751,13 +1598,12 @@ edit_client() {
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
         echo -e "  ${CYAN}5${RESET}) Configure scheduled restart"
-        echo -e "  ${CYAN}6${RESET}) DPI resistance settings"
-        echo -e "  ${CYAN}7${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}8${RESET}) Back to main menu (discard changes)"
+        echo -e "  ${CYAN}6${RESET}) Apply changes and restart service"
+        echo -e "  ${CYAN}7${RESET}) Back to main menu (discard changes)"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-8${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1844,43 +1690,6 @@ edit_client() {
                 fi
                 ;;
             6)
-                echo ""
-                echo -e "  ${BOLD}Current DPI settings:${RESET}"
-                echo -e "    Secret path:       ${CYAN}${PARSED_SECRET_PATH:-none}${RESET}"
-                echo -e "    Ping interval:     ${CYAN}${PARSED_PING_FREQ:-60}s${RESET}"
-                echo -e "    Min idle conns:    ${CYAN}${PARSED_MIN_IDLE:-1}${RESET}"
-                echo ""
-                echo -e "  ${CYAN}1${RESET}) Change secret path (must match Iran VPS server)"
-                echo -e "  ${CYAN}2${RESET}) Change ping interval"
-                echo -e "  ${CYAN}3${RESET}) Change min idle connections"
-                echo -e "  ${CYAN}4${RESET}) Back"
-                echo ""
-                local dpi_c_choice
-                read -rp "$(echo -e "  ${BOLD}Enter 1-4${RESET}: ")" dpi_c_choice
-                case "$dpi_c_choice" in
-                    1)
-                        ask _NEW_CSP "Secret path from Iran VPS server (blank = none)" "${PARSED_SECRET_PATH:-}"
-                        if [ -n "$_NEW_CSP" ]; then
-                            [[ "$_NEW_CSP" != /* ]] && _NEW_CSP="/${_NEW_CSP}"
-                            [[ "$_NEW_CSP" != */ ]] && _NEW_CSP="${_NEW_CSP}/"
-                        fi
-                        PARSED_SECRET_PATH="$_NEW_CSP"
-                        changed=true; success "Secret path: ${PARSED_SECRET_PATH:-none}"
-                        ;;
-                    2)
-                        ask _NEW_CPING "Ping interval (seconds)" "${PARSED_PING_FREQ:-60}"
-                        PARSED_PING_FREQ="$_NEW_CPING"
-                        changed=true; success "Ping interval: ${PARSED_PING_FREQ}s"
-                        ;;
-                    3)
-                        ask _NEW_CIDLE "Min idle connections (1 recommended)" "${PARSED_MIN_IDLE:-1}"
-                        PARSED_MIN_IDLE="$_NEW_CIDLE"
-                        changed=true; success "Min idle: ${PARSED_MIN_IDLE}"
-                        ;;
-                    4) ;;
-                esac
-                ;;
-            7)
                 ! $changed && { info "No changes to apply."; continue; }
                 if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
                     warn "No port mappings configured — wstunnel will start with no -R flags."
@@ -1908,10 +1717,10 @@ edit_client() {
                 fi
                 return
                 ;;
-            8)
+            7)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 8." ;;
+                warn "Please enter a number between 1 and 7." ;;
         esac
     done
 }
