@@ -2073,6 +2073,14 @@ flow_update() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
+    local has_server=false has_client=false
+    for _svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        case "$_svc" in
+            wstunnel-server.service) has_server=true ;;
+            wstunnel-client.service) has_client=true ;;
+        esac
+    done
+
     if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
         echo ""
         echo -e "  Services:"
@@ -2111,7 +2119,20 @@ flow_update() {
     fi
     confirm "  Update ws script from GitHub?" && do_script=true
 
-    if ! $do_wstunnel && ! $do_caddy && ! $do_script; then
+    # ── config migration ─────────────────────────
+    local do_config=false
+    if $has_server || $has_client; then
+        echo ""
+        echo -e "  ${BOLD}Config migration${RESET}"
+        echo -e "  ${YELLOW}Applies structural changes from the new script to running services:${RESET}"
+        $has_server && echo -e "  ${YELLOW}  · Caddyfile: regenerate blocks in new format (zero downtime)${RESET}"
+        $has_server && echo -e "  ${YELLOW}  · Server service: apply new flag structure (brief wstunnel restart)${RESET}"
+        $has_client && echo -e "  ${YELLOW}  · Client service: apply new flag structure (brief tunnel reconnect)${RESET}"
+        echo -e "  ${YELLOW}  Your settings (domain, ports, secret path, etc.) are preserved.${RESET}"
+        confirm "  Apply config migration?" && do_config=true
+    fi
+
+    if ! $do_wstunnel && ! $do_caddy && ! $do_script && ! $do_config; then
         echo ""
         info "Nothing selected — no changes made."
         return
@@ -2123,6 +2144,7 @@ flow_update() {
     $do_wstunnel && echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
     $do_caddy    && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
     $do_script   && echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
+    $do_config   && echo -e "  ${CYAN}config${RESET}     →  migrate to new script format"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     confirm "Proceed?" || { info "Aborted."; return; }
@@ -2157,8 +2179,8 @@ flow_update() {
         install_ws_command
     fi
 
-    # ── restart services if wstunnel was updated ──
-    if $do_wstunnel; then
+    # ── restart services if wstunnel binary was updated ──
+    if $do_wstunnel && ! $do_config; then
         echo ""
         for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
             info "Restarting ${svc} ..."
@@ -2166,6 +2188,45 @@ flow_update() {
             systemctl status "$svc" --no-pager
             echo ""
         done
+    fi
+
+    # ── 4. config migration ──────────────────────
+    if $do_config; then
+        echo ""
+        echo -e "${BOLD}─── Config migration ──────────────────────────────────${RESET}"
+
+        if $has_server; then
+            info "Reading current server config..."
+            parse_server_service
+            parse_server_domains
+            if [ ${#PARSED_DOMAINS[@]} -gt 0 ]; then
+                info "Regenerating Caddyfile blocks (new format)..."
+                for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
+                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_SECRET_PATH:-}"
+                done
+                local _cbin; _cbin=$(caddy_bin)
+                if [ -n "$_cbin" ]; then
+                    if systemctl reload caddy 2>/dev/null; then
+                        success "Caddy reloaded — Caddyfile updated (zero downtime)."
+                    else
+                        warn "Caddy reload failed — check: systemctl status caddy"
+                    fi
+                fi
+            else
+                info "No domains found in Caddyfile — skipping Caddy update."
+            fi
+            echo ""
+            info "Regenerating wstunnel-server service file..."
+            write_server_service
+        fi
+
+        if $has_client; then
+            echo ""
+            info "Reading current client config..."
+            parse_client_service
+            info "Regenerating wstunnel-client service file..."
+            write_client_service
+        fi
     fi
 
     echo ""
