@@ -425,7 +425,7 @@ while i < len(lines):
             depth += lines[i].count('{') - lines[i].count('}')
             block.append(lines[i])
             i += 1
-        if f'reverse_proxy localhost:{port}' in '\n'.join(block):
+        if ('localhost:' + port) in '\n'.join(block):
             print(domain)
     else:
         i += 1
@@ -712,7 +712,7 @@ diagnose_server() {
                 echo -e "         ${CYAN}}${RESET}"
                 echo -e "         ${CYAN}EOF${RESET}"
                 echo -e "         ${CYAN}systemctl reload caddy${RESET}"
-            elif grep -q "reverse_proxy localhost:${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
+            elif grep -q "localhost:${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
                 check_ok "Caddyfile correctly proxies to localhost:${PARSED_BIND_PORT}"
             else
                 check_warn "Caddyfile may not proxy to localhost:${PARSED_BIND_PORT}"
@@ -2087,7 +2087,7 @@ while i < len(lines):
             block.append(lines[i])
             i += 1
         # skip block if it contains our reverse_proxy line
-        if any(f'reverse_proxy localhost:{port}' in ln for ln in block):
+        if any(('localhost:' + port) in ln for ln in block):
             pass
         else:
             result.extend(block)
