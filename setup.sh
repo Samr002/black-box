@@ -1260,9 +1260,6 @@ flow_server() {
     echo -e "  Caddy logs:     ${CYAN}sudo journalctl -u caddy -f${RESET}"
     echo -e "  Caddyfile:      ${CYAN}/etc/caddy/Caddyfile${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    if false; then
-        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    fi
     echo ""
     echo ""
     echo -e "${BOLD}─── ws command ────────────────────────────────────────${RESET}"
@@ -1982,7 +1979,7 @@ flow_update() {
             if [ ${#PARSED_DOMAINS[@]} -gt 0 ]; then
                 info "Regenerating Caddyfile blocks (new format)..."
                 for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_SECRET_PATH:-}"
+                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
                 done
                 local _cbin; _cbin=$(caddy_bin)
                 if [ -n "$_cbin" ]; then
