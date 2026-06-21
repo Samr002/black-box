@@ -230,7 +230,8 @@ configure_caddyfile() {
     local global_block
     global_block='{
     servers {
-        protocols h1 h2
+        protocols h1
+        enable_full_duplex
         timeouts {
             read_header 10s
             idle        0
@@ -2234,7 +2235,7 @@ while i < len(lines):
             block.append(lines[i])
             i += 1
         # skip block if it contains our reverse_proxy line
-        if any(('localhost:' + port) in ln for ln in block):
+        if any(('localhost:' + port) in ln or ('127.0.0.1:' + port) in ln for ln in block):
             pass
         else:
             result.extend(block)
