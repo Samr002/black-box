@@ -1227,6 +1227,32 @@ flow_diagnose() {
 }
 
 # ─────────────────────────────────────────────
+# Kernel TCP tuning for high-connection server
+# ─────────────────────────────────────────────
+tune_kernel_for_server() {
+    info "Applying kernel TCP tuning for high-connection workloads..."
+    local sysctl_conf="/etc/sysctl.conf"
+    local params=(
+        "net.ipv4.tcp_max_syn_backlog=4096"
+        "net.core.netdev_max_backlog=4096"
+        "net.ipv4.tcp_syn_retries=3"
+        "net.ipv4.tcp_fin_timeout=15"
+        "net.ipv4.tcp_tw_reuse=1"
+    )
+    for param in "${params[@]}"; do
+        local key="${param%%=*}"
+        local val="${param##*=}"
+        if grep -q "^${key}" "$sysctl_conf" 2>/dev/null; then
+            sed -i "s|^${key}.*|${key} = ${val}|" "$sysctl_conf"
+        else
+            echo "${key} = ${val}" >> "$sysctl_conf"
+        fi
+    done
+    sysctl -p &>/dev/null
+    success "Kernel TCP tuning applied (tcp_max_syn_backlog=4096, tcp_tw_reuse=1)."
+}
+
+# ─────────────────────────────────────────────
 # Install — Iran VPS (server)
 # ─────────────────────────────────────────────
 flow_server() {
@@ -1281,6 +1307,7 @@ flow_server() {
     install_wstunnel_binary "$WSTUNNEL_VERSION"
     setup_user
     write_server_service
+    tune_kernel_for_server
 
     # ── ۲. نصب و کانفیگ Caddy ──────────────────────────
     echo ""
