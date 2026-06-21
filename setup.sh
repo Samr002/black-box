@@ -231,6 +231,10 @@ configure_caddyfile() {
     global_block='{
     servers {
         protocols h1 h2
+        timeouts {
+            read_header 10s
+            idle        0
+        }
     }
 }'
 
@@ -452,7 +456,8 @@ while i < len(lines):
             depth += lines[i].count('{') - lines[i].count('}')
             block.append(lines[i])
             i += 1
-        if ('localhost:' + port) in '\n'.join(block):
+        block_text = '\n'.join(block)
+        if ('localhost:' + port) in block_text or ('127.0.0.1:' + port) in block_text:
             print(domain)
     else:
         i += 1
@@ -498,7 +503,7 @@ show_server_state() {
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
-    result+=" --connection-min-idle 10"
+    result+=" --connection-min-idle 5"
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
@@ -527,7 +532,9 @@ Group=wstunnel
 WorkingDirectory=/home/wstunnel
 ExecStart=${exec_full}
 Restart=always
-RestartSec=3
+RestartSec=20
+LimitNOFILE=65536
+TasksMax=65536
 StandardOutput=journal
 StandardError=journal
 
@@ -560,7 +567,9 @@ Group=wstunnel
 WorkingDirectory=/home/wstunnel
 ExecStart=/usr/local/bin/wstunnel server ${exec_flags} ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}
 Restart=always
-RestartSec=3
+RestartSec=5
+LimitNOFILE=65536
+TasksMax=65536
 StandardOutput=journal
 StandardError=journal
 
@@ -739,10 +748,10 @@ diagnose_server() {
                 echo -e "         ${CYAN}}${RESET}"
                 echo -e "         ${CYAN}EOF${RESET}"
                 echo -e "         ${CYAN}systemctl reload caddy${RESET}"
-            elif grep -q "localhost:${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
-                check_ok "Caddyfile correctly proxies to localhost:${PARSED_BIND_PORT}"
+            elif grep -qE "(localhost|127\.0\.0\.1):${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
+                check_ok "Caddyfile correctly proxies to :${PARSED_BIND_PORT}"
             else
-                check_warn "Caddyfile may not proxy to localhost:${PARSED_BIND_PORT}"
+                check_warn "Caddyfile may not proxy to :${PARSED_BIND_PORT}"
                 echo -e "         ${YELLOW}→ cat /etc/caddy/Caddyfile${RESET}"
             fi
         fi
