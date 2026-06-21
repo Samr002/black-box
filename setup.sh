@@ -49,9 +49,6 @@ declare -a PARSED_FLAGS=()
 PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
 declare -a PARSED_DOMAINS=()
-PARSED_SECRET_PATH=""
-PARSED_PING_FREQ=""
-PARSED_MIN_IDLE=""
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -237,10 +234,12 @@ configure_caddyfile() {
 }"
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
+        # فایل وجود ندارد یا خالی است — از صفر بنویس
         printf '%s\n' "$block" > "$caddyfile"
         success "Caddyfile created with domain ${domain}."
     elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
-        info "Updating ${domain} in Caddyfile..."
+        # بلاک این دامنه از قبل وجود دارد — پورت را به‌روز کن
+        info "Updating ${domain} in Caddyfile (port → ${port})..."
         python3 - "$caddyfile" "$domain" "$port" <<'PYEOF'
 import sys, re
 path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -258,23 +257,16 @@ while i < len(lines):
         while i < len(lines) and depth > 0:
             depth += lines[i].count('{') - lines[i].count('}')
             i += 1
-        result.extend([
-            f"{domain} {{",
-            "    header -Server",
-            f"    reverse_proxy localhost:{port}",
-            "}"
-        ])
+        # Insert updated block as separate lines (no embedded \n)
+        result.extend([f"{domain} {{", "    header -Server",
+                        f"    reverse_proxy localhost:{port}", "}"])
         replaced = True
     else:
         result.append(lines[i])
         i += 1
 if not replaced:
-    result.extend([
-        "", f"{domain} {{",
-        "    header -Server",
-        f"    reverse_proxy localhost:{port}",
-        "}"
-    ])
+    result.extend(["", f"{domain} {{", "    header -Server",
+                   f"    reverse_proxy localhost:{port}", "}"])
 output = '\n'.join(result)
 if not output.endswith('\n'):
     output += '\n'
@@ -283,10 +275,12 @@ with open(path, 'w') as f:
 PYEOF
         success "Caddyfile updated for ${domain}."
     else
+        # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
         printf '\n%s\n' "$block" >> "$caddyfile"
         success "Domain ${domain} added to Caddyfile."
     fi
 
+    # اعتبارسنجی کانفیگ
     local cbin; cbin=$(caddy_bin)
     if [ -n "$cbin" ]; then
         if "$cbin" validate --config "$caddyfile" &>/dev/null 2>&1; then
@@ -374,7 +368,6 @@ setup_user() {
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
     PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=()
-    PARSED_SECRET_PATH="" PARSED_PING_FREQ="20" PARSED_MIN_IDLE="3"
     if [ ! -f "$svc_file" ]; then
         warn "Client service file not found — some values will be empty"
         return
@@ -389,19 +382,11 @@ parse_client_service() {
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
     done < <(echo "$exec_line" | grep -oE 'tcp://[^[:space:]]+')
-    local _path_flag _ping_flag _idle_flag
-    _path_flag=$(echo "$exec_line" | grep -oE -- '--http-upgrade-path-prefix [^[:space:]]+' | awk '{print $2}')
-    _ping_flag=$(echo "$exec_line" | grep -oE -- '--websocket-ping-frequency-sec [^[:space:]]+' | awk '{print $2}')
-    _idle_flag=$(echo "$exec_line" | grep -oE -- '--connection-min-idle [^[:space:]]+' | awk '{print $2}')
-    PARSED_SECRET_PATH="${_path_flag:-}"
-    PARSED_PING_FREQ="${_ping_flag:-20}"
-    PARSED_MIN_IDLE="${_idle_flag:-3}"
 }
 
 parse_server_service() {
     local svc_file="/etc/systemd/system/wstunnel-server.service"
     PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018"
-    PARSED_SECRET_PATH="" PARSED_PING_FREQ="20"
     if [ ! -f "$svc_file" ]; then
         warn "Server service file not found — using default values for diagnostics"
         return
@@ -411,11 +396,6 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    local _path_flag _ping_flag
-    _path_flag=$(echo "$exec_line" | grep -oE -- '--restrict-http-upgrade-path-prefix [^[:space:]]+' | awk '{print $2}')
-    _ping_flag=$(echo "$exec_line" | grep -oE -- '--websocket-ping-frequency-sec [^[:space:]]+' | awk '{print $2}')
-    PARSED_SECRET_PATH="${_path_flag:-}"
-    PARSED_PING_FREQ="${_ping_flag:-20}"
 }
 
 parse_server_domains() {
@@ -445,8 +425,7 @@ while i < len(lines):
             depth += lines[i].count('{') - lines[i].count('}')
             block.append(lines[i])
             i += 1
-        block_str = '\n'.join(block)
-        if f'reverse_proxy localhost:{port}' in block_str or f'reverse_proxy @wstunnel localhost:{port}' in block_str:
+        if f'reverse_proxy localhost:{port}' in '\n'.join(block):
             print(domain)
     else:
         i += 1
@@ -491,8 +470,8 @@ show_server_state() {
 
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
-    result+=" --websocket-ping-frequency-sec ${PARSED_PING_FREQ:-60}"
-    result+=" --connection-min-idle ${PARSED_MIN_IDLE:-1}"
+    result+=" --websocket-ping-frequency-sec 20"
+    result+=" --connection-min-idle 3"
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
@@ -538,7 +517,7 @@ EOF
 }
 
 write_server_service() {
-    local exec_flags="--websocket-ping-frequency-sec ${PARSED_PING_FREQ:-60}"
+    local exec_flags="--websocket-ping-frequency-sec 20"
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -1196,9 +1175,6 @@ flow_server() {
         echo ""
     done
 
-    PARSED_SECRET_PATH=""
-    PARSED_PING_FREQ="60"
-
     echo ""
     echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
     echo -e "  ${YELLOW}Periodic restart keeps the tunnel fresh and clears stale connections.${RESET}"
@@ -1279,10 +1255,6 @@ flow_client() {
     echo -e "${BOLD}─── Iran VPS connection ───────────────────────────────${RESET}"
     ask PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)" ""
     ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
-
-    PARSED_SECRET_PATH=""
-    PARSED_PING_FREQ="60"
-    PARSED_MIN_IDLE="1"
 
     echo ""
     echo -e "${BOLD}─── Port mappings ─────────────────────────────────────${RESET}"
@@ -1526,19 +1498,21 @@ edit_server() {
                 confirm "Apply changes?" || continue
                 echo ""
 
-                # 1. wstunnel service — if bind address changed
+                # 1. wstunnel service — فقط اگه bind address تغییر کرده
                 local port_changed=false
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     write_server_service
-                    [ "${PARSED_BIND_PORT}" != "${old_port}" ] && port_changed=true
+                    port_changed=true
                 fi
 
-                # 2. Remove domains from Caddyfile first
+                # 2. اول دامنه‌های حذفی رو از Caddyfile بردار (بدون دست زدن به بقیه)
                 for dom in "${DOMAINS_TO_REMOVE[@]+"${DOMAINS_TO_REMOVE[@]}"}"; do
                     remove_caddyfile_domain "$dom"
                 done
 
-                # 3. Configure domains — if port changed update all, else only new
+                # 3. بعد دامنه‌های جدید رو اضافه/آپدیت کن
+                # اگه پورت عوض شده: همه دامنه‌های باقیمونده رو آپدیت کن
+                # اگه پورت نعوض نشده: فقط دامنه‌های تازه‌اضافه‌شده رو configure کن
                 if $port_changed; then
                     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
                         configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
@@ -1850,14 +1824,6 @@ flow_update() {
     declare -a FOUND_SVCS=()
     detect_services FOUND_SVCS
 
-    local has_server=false has_client=false
-    for _svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        case "$_svc" in
-            wstunnel-server.service) has_server=true ;;
-            wstunnel-client.service) has_client=true ;;
-        esac
-    done
-
     if [ ${#FOUND_SVCS[@]} -gt 0 ]; then
         echo ""
         echo -e "  Services:"
@@ -1896,20 +1862,7 @@ flow_update() {
     fi
     confirm "  Update ws script from GitHub?" && do_script=true
 
-    # ── config migration ─────────────────────────
-    local do_config=false
-    if $has_server || $has_client; then
-        echo ""
-        echo -e "  ${BOLD}Config migration${RESET}"
-        echo -e "  ${YELLOW}Applies structural changes from the new script to running services:${RESET}"
-        $has_server && echo -e "  ${YELLOW}  · Caddyfile: regenerate blocks in new format (zero downtime)${RESET}"
-        $has_server && echo -e "  ${YELLOW}  · Server service: apply new flag structure (brief wstunnel restart)${RESET}"
-        $has_client && echo -e "  ${YELLOW}  · Client service: apply new flag structure (brief tunnel reconnect)${RESET}"
-        echo -e "  ${YELLOW}  Your settings (domain, ports, secret path, etc.) are preserved.${RESET}"
-        confirm "  Apply config migration?" && do_config=true
-    fi
-
-    if ! $do_wstunnel && ! $do_caddy && ! $do_script && ! $do_config; then
+    if ! $do_wstunnel && ! $do_caddy && ! $do_script; then
         echo ""
         info "Nothing selected — no changes made."
         return
@@ -1921,7 +1874,6 @@ flow_update() {
     $do_wstunnel && echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
     $do_caddy    && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
     $do_script   && echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
-    $do_config   && echo -e "  ${CYAN}config${RESET}     →  migrate to new script format"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     confirm "Proceed?" || { info "Aborted."; return; }
@@ -1956,8 +1908,8 @@ flow_update() {
         install_ws_command
     fi
 
-    # ── restart services if wstunnel binary was updated ──
-    if $do_wstunnel && ! $do_config; then
+    # ── restart services if wstunnel was updated ──
+    if $do_wstunnel; then
         echo ""
         for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
             info "Restarting ${svc} ..."
@@ -1965,45 +1917,6 @@ flow_update() {
             systemctl status "$svc" --no-pager
             echo ""
         done
-    fi
-
-    # ── 4. config migration ──────────────────────
-    if $do_config; then
-        echo ""
-        echo -e "${BOLD}─── Config migration ──────────────────────────────────${RESET}"
-
-        if $has_server; then
-            info "Reading current server config..."
-            parse_server_service
-            parse_server_domains
-            if [ ${#PARSED_DOMAINS[@]} -gt 0 ]; then
-                info "Regenerating Caddyfile blocks (new format)..."
-                for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-                    configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
-                done
-                local _cbin; _cbin=$(caddy_bin)
-                if [ -n "$_cbin" ]; then
-                    if systemctl reload caddy 2>/dev/null; then
-                        success "Caddy reloaded — Caddyfile updated (zero downtime)."
-                    else
-                        warn "Caddy reload failed — check: systemctl status caddy"
-                    fi
-                fi
-            else
-                info "No domains found in Caddyfile — skipping Caddy update."
-            fi
-            echo ""
-            info "Regenerating wstunnel-server service file..."
-            write_server_service
-        fi
-
-        if $has_client; then
-            echo ""
-            info "Reading current client config..."
-            parse_client_service
-            info "Regenerating wstunnel-client service file..."
-            write_client_service
-        fi
     fi
 
     echo ""
