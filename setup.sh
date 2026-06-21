@@ -229,6 +229,7 @@ configure_caddyfile() {
 
     local block
     block="${domain} {
+    tls internal
     header -Server
     reverse_proxy localhost:${port}
 }"
@@ -258,14 +259,14 @@ while i < len(lines):
             depth += lines[i].count('{') - lines[i].count('}')
             i += 1
         # Insert updated block as separate lines (no embedded \n)
-        result.extend([f"{domain} {{", "    header -Server",
+        result.extend([f"{domain} {{", "    tls internal", "    header -Server",
                         f"    reverse_proxy localhost:{port}", "}"])
         replaced = True
     else:
         result.append(lines[i])
         i += 1
 if not replaced:
-    result.extend(["", f"{domain} {{", "    header -Server",
+    result.extend(["", f"{domain} {{", "    tls internal", "    header -Server",
                    f"    reverse_proxy localhost:{port}", "}"])
 output = '\n'.join(result)
 if not output.endswith('\n'):
@@ -1038,11 +1039,43 @@ diagnose_client() {
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
 
-    # 9. Log analysis
+    # 9. Caddy CA cert trust check
+    echo ""
+    echo -e "  ${BOLD}Caddy CA Certificate Trust:${RESET}"
+    local _ca_file
+    _ca_file=$(ls /usr/local/share/ca-certificates/caddy*.crt 2>/dev/null | head -1 || true)
+    if [ -n "$_ca_file" ]; then
+        check_ok "Caddy CA cert found: ${_ca_file}"
+        if openssl verify -CAfile "$_ca_file" "$_ca_file" &>/dev/null 2>&1 \
+            || openssl x509 -in "$_ca_file" -noout -subject &>/dev/null 2>&1; then
+            check_ok "CA cert appears valid"
+        else
+            check_warn "CA cert may be malformed — try reinstalling from Iran VPS"
+        fi
+    else
+        check_fail "Caddy CA cert NOT installed"
+        echo -e "         ${RED}Iran VPS uses 'tls internal' — this VPS won't trust its cert!${RESET}"
+        echo -e "         ${YELLOW}→ On Iran VPS run:${RESET}"
+        echo -e "         ${CYAN}   cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt${RESET}"
+        echo -e "         ${YELLOW}→ On this Foreign VPS paste that output into:${RESET}"
+        echo -e "         ${CYAN}   cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt${RESET}"
+        echo -e "         ${CYAN}   update-ca-certificates${RESET}"
+        echo -e "         ${CYAN}   systemctl restart wstunnel-client.service${RESET}"
+    fi
+
+    # 10. Log analysis
     echo ""
     echo -e "  ${BOLD}Log analysis:${RESET}"
     local _cli_logs
     _cli_logs=$(journalctl -u wstunnel-client.service -n 50 --no-pager 2>/dev/null || true)
+
+    local tls_error=false
+    if echo "$_cli_logs" | grep -qi "certificate.*unknown\|unknown.*authority\|tls.*handshake\|x509\|certificate.*verify"; then
+        tls_error=true
+        check_fail "Logs: TLS certificate trust error — Caddy CA cert not trusted!"
+        echo -e "         ${RED}The Foreign VPS does not trust Iran VPS's self-signed TLS cert.${RESET}"
+        echo -e "         ${YELLOW}→ Install Caddy CA cert (see step 9 above)${RESET}"
+    fi
 
     if echo "$_cli_logs" | grep -qi "error.*bind\|address already in use\|EADDRINUSE\|already.*listen"; then
         check_fail "Logs: port binding error — another client is already using that Iran VPS port!"
@@ -1063,10 +1096,19 @@ diagnose_client() {
     echo "$_cli_logs" | tail -30 | sed 's/^/    /' \
         || echo -e "    ${YELLOW}(no logs available)${RESET}"
 
-    # 10. Summary verdict
+    # 11. Summary verdict
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━  Verdict  ━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
-    if $caddy_broken; then
+    if $tls_error; then
+        echo -e "  ${RED}Root cause: TLS certificate not trusted on this Foreign VPS.${RESET}"
+        echo -e "  Iran VPS uses 'tls internal' but this VPS doesn't have the CA cert."
+        echo ""
+        echo -e "  ${YELLOW}Fix — on Iran VPS get the CA cert:${RESET}"
+        echo -e "  ${CYAN}cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt${RESET}"
+        echo -e "  ${YELLOW}Then on THIS Foreign VPS:${RESET}"
+        echo -e "  ${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt${RESET}  [paste + Ctrl+D]"
+        echo -e "  ${CYAN}update-ca-certificates && systemctl restart wstunnel-client.service${RESET}"
+    elif $caddy_broken; then
         echo -e "  ${RED}Root cause: Caddyfile on Iran VPS is returning 404.${RESET}"
         echo -e "  wstunnel cannot connect because Caddy rejects all requests."
         echo ""
@@ -1236,6 +1278,35 @@ flow_server() {
     echo -e "  Caddy logs:     ${CYAN}sudo journalctl -u caddy -f${RESET}"
     echo -e "  Caddyfile:      ${CYAN}/etc/caddy/Caddyfile${RESET}"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
+    # ── CA cert — باید روی هر Foreign VPS نصب شود ──────────
+    echo ""
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━  CA Certificate  ━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "  ${YELLOW}Caddy uses 'tls internal' (self-signed CA).${RESET}"
+    echo -e "  ${YELLOW}Each Foreign VPS MUST trust this CA for the tunnel to work.${RESET}"
+    echo ""
+    local _caddy_ca="/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt"
+    # Caddy ممکنه چند ثانیه طول بکشه تا CA بسازه
+    local _wait=0
+    while [ ! -f "$_caddy_ca" ] && [ $_wait -lt 10 ]; do
+        sleep 1; _wait=$((_wait + 1))
+    done
+    if [ -f "$_caddy_ca" ]; then
+        echo -e "  ${BOLD}Run these commands on each Foreign VPS:${RESET}"
+        echo ""
+        echo -e "${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt << 'CACEOF'${RESET}"
+        cat "$_caddy_ca"
+        echo -e "${CYAN}CACEOF${RESET}"
+        echo -e "${CYAN}update-ca-certificates${RESET}"
+        echo -e "${CYAN}systemctl restart wstunnel-client.service${RESET}"
+    else
+        echo -e "  ${YELLOW}CA cert not generated yet. Run after ~30s:${RESET}"
+        echo -e "  ${CYAN}cat ${_caddy_ca}${RESET}"
+        echo -e "  Copy output to Foreign VPS: /usr/local/share/ca-certificates/caddy-iran-ca.crt"
+        echo -e "  Then run: update-ca-certificates"
+    fi
+    echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
     echo ""
     echo ""
     echo -e "${BOLD}─── ws command ────────────────────────────────────────${RESET}"
@@ -1255,6 +1326,33 @@ flow_client() {
     echo -e "${BOLD}─── Iran VPS connection ───────────────────────────────${RESET}"
     ask PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)" ""
     ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
+
+    echo ""
+    echo -e "${BOLD}─── Caddy CA Certificate (TLS Trust) ──────────────────${RESET}"
+    echo -e "  ${YELLOW}Iran VPS uses 'tls internal'. This VPS must trust Caddy's CA cert.${RESET}"
+    echo -e "  ${YELLOW}Get the cert from Iran VPS:${RESET}"
+    echo -e "  ${CYAN}cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt${RESET}"
+    echo ""
+    local _ca_already=false
+    if ls /usr/local/share/ca-certificates/ 2>/dev/null | grep -qi "caddy"; then
+        _ca_already=true
+        check_ok "A Caddy CA cert is already in /usr/local/share/ca-certificates/"
+        confirm "  Reinstall / update it?" || _ca_already=true
+    fi
+    if ! $_ca_already; then
+        echo -e "  ${BOLD}Paste the cert content below (from Iran VPS), then press Ctrl+D:${RESET}"
+        local _ca_content
+        _ca_content=$(cat 2>/dev/null || true)
+        if echo "$_ca_content" | grep -q "BEGIN CERTIFICATE"; then
+            echo "$_ca_content" > /usr/local/share/ca-certificates/caddy-iran-ca.crt
+            update-ca-certificates &>/dev/null
+            success "Caddy CA cert installed — TLS trust configured."
+        else
+            warn "No valid cert pasted — skipping. Install manually later:"
+            echo -e "  ${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt${RESET}"
+            echo -e "  ${CYAN}update-ca-certificates${RESET}"
+        fi
+    fi
 
     echo ""
     echo -e "${BOLD}─── Port mappings ─────────────────────────────────────${RESET}"
