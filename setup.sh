@@ -231,7 +231,12 @@ configure_caddyfile() {
     block="${domain} {
     tls internal
     header -Server
-    reverse_proxy localhost:${port}
+    reverse_proxy localhost:${port} {
+        flush_interval -1
+        transport http {
+            response_header_timeout 0
+        }
+    }
 }"
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
@@ -260,14 +265,24 @@ while i < len(lines):
             i += 1
         # Insert updated block as separate lines (no embedded \n)
         result.extend([f"{domain} {{", "    tls internal", "    header -Server",
-                        f"    reverse_proxy localhost:{port}", "}"])
+                        f"    reverse_proxy localhost:{port} {{",
+                        "        flush_interval -1",
+                        "        transport http {",
+                        "            response_header_timeout 0",
+                        "        }",
+                        "    }", "}"])
         replaced = True
     else:
         result.append(lines[i])
         i += 1
 if not replaced:
     result.extend(["", f"{domain} {{", "    tls internal", "    header -Server",
-                   f"    reverse_proxy localhost:{port}", "}"])
+                   f"    reverse_proxy localhost:{port} {{",
+                   "        flush_interval -1",
+                   "        transport http {",
+                   "            response_header_timeout 0",
+                   "        }",
+                   "    }", "}"])
 output = '\n'.join(result)
 if not output.endswith('\n'):
     output += '\n'
@@ -471,8 +486,8 @@ show_server_state() {
 
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
-    result+=" --websocket-ping-frequency-sec 20"
-    result+=" --connection-min-idle 3"
+    result+=" --websocket-ping-frequency-sec 30"
+    result+=" --connection-min-idle 10"
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
@@ -518,7 +533,7 @@ EOF
 }
 
 write_server_service() {
-    local exec_flags="--websocket-ping-frequency-sec 20"
+    local exec_flags="--websocket-ping-frequency-sec 30"
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
