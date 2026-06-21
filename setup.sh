@@ -795,22 +795,70 @@ diagnose_server() {
         echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
     fi
 
-    # 9. بررسی لاگ برای خطاهای رایج
+    # 12. Multi-location: نمایش پورت‌های -R باز شده توسط کلاینت‌ها
+    echo ""
+    echo -e "  ${BOLD}Reverse Tunnel Ports (opened by Foreign VPS clients):${RESET}"
+    local _wstunnel_pid
+    _wstunnel_pid=$(systemctl show wstunnel-server.service --property=MainPID --value 2>/dev/null || echo "")
+    # پورت‌هایی که wstunnel روشون listen می‌کنه (به جز پورت خودش)
+    local _r_ports
+    _r_ports=$(ss -tlnp 2>/dev/null \
+        | grep "wstunnel\|pid=${_wstunnel_pid}," \
+        | grep -v ":${PARSED_BIND_PORT} " \
+        | awk '{print $4}' | sort -u)
+    if [ -n "$_r_ports" ]; then
+        while IFS= read -r _p; do
+            [ -z "$_p" ] && continue
+            echo -e "    ${GREEN}✓${RESET}  ${_p}  — client connected and port is open"
+        done <<< "$_r_ports"
+        local _conn_count
+        _conn_count=$(ss -tnp 2>/dev/null \
+            | grep "pid=${_wstunnel_pid}," 2>/dev/null \
+            | grep -c "ESTAB" 2>/dev/null || echo "?")
+        echo -e "    ${CYAN}Active WebSocket connections: ${_conn_count}${RESET}"
+    else
+        check_warn "No -R ports bound — no Foreign VPS client is currently connected"
+        echo -e "         ${YELLOW}→ Check client service on each Foreign VPS:${RESET}"
+        echo -e "         ${CYAN}   systemctl status wstunnel-client.service${RESET}"
+    fi
+
+    # 13. بررسی لاگ برای خطاهای رایج
+    echo ""
+    echo -e "  ${BOLD}Log analysis:${RESET}"
     local recent_logs
-    recent_logs=$(journalctl -u wstunnel-server.service -n 30 --no-pager 2>/dev/null || true)
+    recent_logs=$(journalctl -u wstunnel-server.service -n 50 --no-pager 2>/dev/null || true)
 
     if echo "$recent_logs" | grep -q "Rejecting connection with not allowed destination"; then
-        check_fail "Recent logs confirm: reverse tunnel connections are being REJECTED"
+        check_fail "Logs: reverse tunnel connections are being REJECTED (--restrict-to)"
         echo -e "         ${YELLOW}→ Run the fix above (remove --restrict-to) and restart service${RESET}"
     fi
 
+    if echo "$recent_logs" | grep -q "error.*bind\|address already in use\|EADDRINUSE"; then
+        check_fail "Logs: port binding error — two clients trying to use the same -R port!"
+        echo -e "         ${RED}Each Foreign VPS must use a unique Iran VPS port.${RESET}"
+        echo -e "         ${YELLOW}→ Edit the conflicting client and change its Iran VPS port${RESET}"
+    fi
+
+    # کلاینت‌هایی که در لاگ‌ها connect/disconnect کردن
+    local _client_ips
+    _client_ips=$(echo "$recent_logs" \
+        | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' \
+        | grep -v "127\.0\.0\." \
+        | sort -u | head -10)
+    if [ -n "$_client_ips" ]; then
+        echo -e "    ${CYAN}Seen client IPs in recent logs:${RESET}"
+        echo "$_client_ips" | while IFS= read -r _ip; do
+            echo -e "      ${CYAN}${_ip}${RESET}"
+        done
+    fi
+
     if echo "$recent_logs" | grep -q "Invalid protocol version"; then
-        check_warn "Some non-WebSocket clients are connecting (normal — browsers/scanners)"
+        check_warn "Some non-WebSocket traffic detected (normal — browsers/scanners)"
     fi
 
     echo ""
-    echo -e "  ${BOLD}Last 15 log lines:${RESET}"
-    echo "$recent_logs" | tail -15 | sed 's/^/    /'
+    echo -e "  ${BOLD}Last 20 log lines:${RESET}"
+    echo "$recent_logs" | tail -20 | sed 's/^/    /'
 
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -834,9 +882,19 @@ diagnose_client() {
         check_fail "wstunnel binary not found (checked /usr/local/bin and /usr/bin)"
     fi
 
-    # 2. Service running
+    # 2. Service running / restart loop detection
     if systemctl is-active wstunnel-client.service &>/dev/null; then
-        check_ok "wstunnel-client.service is running"
+        # Check restart count — if high, the service is in a crash loop
+        local _restart_count
+        _restart_count=$(systemctl show wstunnel-client.service --property=NRestarts --value 2>/dev/null || echo "0")
+        if [ "${_restart_count:-0}" -gt 5 ] 2>/dev/null; then
+            check_warn "wstunnel-client.service is running BUT has restarted ${_restart_count} times"
+            echo -e "         ${YELLOW}→ The service keeps reconnecting — likely port conflict on Iran VPS${RESET}"
+            echo -e "         ${YELLOW}→ Check if another Foreign VPS uses the same Iran port${RESET}"
+            echo -e "         ${CYAN}   journalctl -u wstunnel-client.service -n 30 --no-pager${RESET}"
+        else
+            check_ok "wstunnel-client.service is running  (restarts: ${_restart_count:-0})"
+        fi
     else
         check_fail "wstunnel-client.service is NOT running"
         echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-client.service${RESET}"
@@ -853,18 +911,32 @@ diagnose_client() {
     fi
 
     # 4. HTTPS reachability to Iran VPS
+    # Note: curl writes "000" to stdout even on timeout/error AND exits nonzero.
+    # Using || echo "000" would double it to "000000", so we suppress exit code via || true.
     local http_code caddy_broken=false wstunnel_rejecting=false
     http_code=$(curl -sk -o /dev/null -w "%{http_code}" \
         --max-time 6 \
-        "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null || echo "000")
+        "https://${PARSED_DOMAIN}:${PARSED_WSS_PORT}" 2>/dev/null) || true
+    http_code="${http_code:-000}"
+    # wstunnel rejects plain HTTP with connection-close (no response body) → curl gives 000.
+    # Treat this as "reachable but wstunnel-only" — not the same as truly unreachable.
+    local https_reachable=false
     case "$http_code" in
         "000")
-            check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (timeout/refused)"
-            echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
-            echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
-            echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            # Distinguish timeout from connection-refused:
+            # Try a fast TCP connect to see if the port is at least open.
+            if timeout 4 bash -c "echo >/dev/tcp/${PARSED_DOMAIN}/${PARSED_WSS_PORT}" 2>/dev/null; then
+                https_reachable=true
+                check_ok "Iran VPS port ${PARSED_WSS_PORT} is open (wstunnel doesn't respond to plain HTTP — normal)"
+            else
+                check_fail "Cannot reach https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (port closed or timeout)"
+                echo -e "         ${YELLOW}→ Is Caddy running on Iran VPS?${RESET}"
+                echo -e "         ${YELLOW}→ Is port 443 open in Iran VPS firewall?${RESET}"
+                echo -e "         ${YELLOW}→ Does DNS point to Iran VPS?${RESET}"
+            fi
             ;;
         "400")
+            https_reachable=true
             check_fail "Iran VPS returns 400 — wstunnel is rejecting the WebSocket upgrade"
             echo -e "         ${RED}Most likely: --restrict-to or --restrict-http-upgrade-path-prefix flag on Iran VPS${RESET}"
             echo -e "         ${YELLOW}→ On Iran VPS remove --restrict-to:${RESET}"
@@ -875,6 +947,7 @@ diagnose_client() {
             wstunnel_rejecting=true
             ;;
         "404")
+            https_reachable=true
             check_fail "Iran VPS returns 404 — Caddyfile is misconfigured or has 'respond 404'"
             echo -e "         ${RED}Caddy is running but blocking WebSocket connections!${RESET}"
             echo -e "         ${YELLOW}→ On Iran VPS fix Caddyfile:${RESET}"
@@ -883,6 +956,7 @@ diagnose_client() {
             caddy_broken=true
             ;;
         *)
+            https_reachable=true
             check_ok "Iran VPS reachable at https://${PARSED_DOMAIN}:${PARSED_WSS_PORT} (HTTP ${http_code})"
             ;;
     esac
@@ -932,7 +1006,9 @@ diagnose_client() {
         else
             check_fail "Iran VPS:${bp} is NOT reachable (tunnel port closed or firewall blocking)"
             echo -e "         ${YELLOW}→ On Iran VPS run: sudo ufw allow ${bp}/tcp${RESET}"
-            echo -e "         ${YELLOW}→ Check wstunnel-server logs on Iran VPS${RESET}"
+            echo -e "         ${YELLOW}→ Is this port already used by another Foreign VPS client?${RESET}"
+            echo -e "         ${YELLOW}→ Check wstunnel-server logs on Iran VPS:${RESET}"
+            echo -e "         ${CYAN}   journalctl -u wstunnel-server.service -n 50 --no-pager${RESET}"
         fi
     done
 
@@ -962,11 +1038,29 @@ diagnose_client() {
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
 
-    # 9. Recent logs
+    # 9. Log analysis
     echo ""
-    echo -e "  ${BOLD}Last 20 log lines:${RESET}"
-    journalctl -u wstunnel-client.service -n 20 --no-pager 2>/dev/null \
-        | sed 's/^/    /' \
+    echo -e "  ${BOLD}Log analysis:${RESET}"
+    local _cli_logs
+    _cli_logs=$(journalctl -u wstunnel-client.service -n 50 --no-pager 2>/dev/null || true)
+
+    if echo "$_cli_logs" | grep -qi "error.*bind\|address already in use\|EADDRINUSE\|already.*listen"; then
+        check_fail "Logs: port binding error — another client is already using that Iran VPS port!"
+        echo -e "         ${RED}Two Foreign VPS clients using the same Iran port.${RESET}"
+        echo -e "         ${YELLOW}→ Edit → option 4 → change Iran VPS port to a unique value${RESET}"
+    fi
+
+    if echo "$_cli_logs" | grep -qi "refused\|timeout\|unreachable\|connection.*reset"; then
+        check_warn "Logs: connection errors detected — Iran VPS may be unreachable or rejecting"
+    fi
+
+    if echo "$_cli_logs" | grep -qi "register.*reverse\|reverse.*register\|start.*listen"; then
+        check_ok "Logs: reverse tunnel registration messages found (client connected)"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Last 30 log lines:${RESET}"
+    echo "$_cli_logs" | tail -30 | sed 's/^/    /' \
         || echo -e "    ${YELLOW}(no logs available)${RESET}"
 
     # 10. Summary verdict
@@ -1006,6 +1100,10 @@ diagnose_client() {
         echo -e "  ${GREEN}Tunnel appears healthy. If VPN still fails, check VPN client config.${RESET}"
         echo -e "  Make sure the VPN client points to Iran VPS IP and the correct port."
     fi
+    echo ""
+    echo -e "  ${BOLD}Multi-location tip:${RESET} To see ALL connected clients and their ports,"
+    echo -e "  run Diagnose on the ${YELLOW}Iran VPS${RESET} — it shows every bound -R port and"
+    echo -e "  active WebSocket connection from each Foreign VPS."
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 }
 
@@ -1164,6 +1262,11 @@ flow_client() {
     echo -e "    [User] → ${YELLOW}Iran VPS${RESET}:IRAN_PORT  →  WSS tunnel  →  ${GREEN}this VPS${RESET}:LOCAL_PORT"
     echo -e "  Ports open on Iran VPS. Your VPN service must run on LOCAL_PORT here."
     echo ""
+    echo -e "  ${YELLOW}⚠  MULTI-LOCATION:${RESET} If you have more than one Foreign VPS connecting to"
+    echo -e "  the same Iran VPS, ${BOLD}each Foreign VPS must use a different IRAN_PORT${RESET}."
+    echo -e "  Example: VPS-1 → 8443 / VPS-2 → 9443 / VPS-3 → 7443"
+    echo -e "  Two clients sharing the same Iran port = second client never connects."
+    echo ""
 
     PARSED_FLAGS=()
     declare -a IRAN_PORTS=()
@@ -1174,6 +1277,14 @@ flow_client() {
         echo -e "  ${BOLD}── Mapping #${count} ──${RESET}"
         ask IRAN_BIND_IP "Bind IP on Iran VPS (0.0.0.0 = public)" "0.0.0.0"
         ask IRAN_PORT    "Port to open on Iran VPS (users connect here)" "8443"
+        # Check for port conflict with other mappings in this session
+        local _dup_port=false
+        for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
+            [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
+        done
+        if $_dup_port; then
+            warn "Port ${IRAN_PORT} is already used in a previous mapping above. Use a different port."
+        fi
         ask LOCAL_HOST   "Local host on this Foreign VPS (VPN service listens here)" "localhost"
         ask LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
         PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
@@ -1240,6 +1351,11 @@ flow_client() {
     done
     echo ""
     echo -e "  ${BOLD}3. Run Diagnose (option 3) to verify everything is working.${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}MULTI-LOCATION REMINDER:${RESET}"
+    echo -e "  Each Foreign VPS must use a ${BOLD}unique${RESET} Iran VPS port."
+    echo -e "  This machine uses: ${CYAN}$(IFS=,; echo "${IRAN_PORTS[*]}")${RESET}"
+    echo -e "  Other Foreign VPS machines must use different port numbers."
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     echo ""
