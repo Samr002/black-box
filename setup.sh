@@ -305,7 +305,7 @@ PYEOF
     else
         # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
         # اطمینان از وجود global block
-        if ! grep -q 'protocols h1 h2' "$caddyfile" 2>/dev/null; then
+        if ! grep -q 'enable_full_duplex' "$caddyfile" 2>/dev/null; then
             printf '%s\n\n' "$global_block" | cat - "$caddyfile" > "${caddyfile}.tmp" && mv "${caddyfile}.tmp" "$caddyfile"
         fi
         printf '\n%s\n' "$block" >> "$caddyfile"
