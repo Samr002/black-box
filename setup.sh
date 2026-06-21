@@ -834,19 +834,9 @@ diagnose_client() {
         check_fail "wstunnel binary not found (checked /usr/local/bin and /usr/bin)"
     fi
 
-    # 2. Service running / restart loop detection
+    # 2. Service running
     if systemctl is-active wstunnel-client.service &>/dev/null; then
-        # Check restart count — if high, the service is in a crash loop
-        local _restart_count
-        _restart_count=$(systemctl show wstunnel-client.service --property=NRestarts --value 2>/dev/null || echo "0")
-        if [ "${_restart_count:-0}" -gt 5 ] 2>/dev/null; then
-            check_warn "wstunnel-client.service is running BUT has restarted ${_restart_count} times"
-            echo -e "         ${YELLOW}→ The service keeps reconnecting — likely port conflict on Iran VPS${RESET}"
-            echo -e "         ${YELLOW}→ Check if another Foreign VPS uses the same Iran port${RESET}"
-            echo -e "         ${CYAN}   journalctl -u wstunnel-client.service -n 30 --no-pager${RESET}"
-        else
-            check_ok "wstunnel-client.service is running  (restarts: ${_restart_count:-0})"
-        fi
+        check_ok "wstunnel-client.service is running"
     else
         check_fail "wstunnel-client.service is NOT running"
         echo -e "         ${YELLOW}→ sudo systemctl start wstunnel-client.service${RESET}"
@@ -942,9 +932,7 @@ diagnose_client() {
         else
             check_fail "Iran VPS:${bp} is NOT reachable (tunnel port closed or firewall blocking)"
             echo -e "         ${YELLOW}→ On Iran VPS run: sudo ufw allow ${bp}/tcp${RESET}"
-            echo -e "         ${YELLOW}→ Is this port already used by another Foreign VPS client?${RESET}"
-            echo -e "         ${YELLOW}→ Check wstunnel-server logs on Iran VPS:${RESET}"
-            echo -e "         ${CYAN}   journalctl -u wstunnel-server.service -n 50 --no-pager${RESET}"
+            echo -e "         ${YELLOW}→ Check wstunnel-server logs on Iran VPS${RESET}"
         fi
     done
 
@@ -1176,11 +1164,6 @@ flow_client() {
     echo -e "    [User] → ${YELLOW}Iran VPS${RESET}:IRAN_PORT  →  WSS tunnel  →  ${GREEN}this VPS${RESET}:LOCAL_PORT"
     echo -e "  Ports open on Iran VPS. Your VPN service must run on LOCAL_PORT here."
     echo ""
-    echo -e "  ${YELLOW}⚠  MULTI-LOCATION:${RESET} If you have more than one Foreign VPS connecting to"
-    echo -e "  the same Iran VPS, ${BOLD}each Foreign VPS must use a different IRAN_PORT${RESET}."
-    echo -e "  Example: VPS-1 → 8443 / VPS-2 → 9443 / VPS-3 → 7443"
-    echo -e "  Two clients sharing the same Iran port = second client never connects."
-    echo ""
 
     PARSED_FLAGS=()
     declare -a IRAN_PORTS=()
@@ -1191,14 +1174,6 @@ flow_client() {
         echo -e "  ${BOLD}── Mapping #${count} ──${RESET}"
         ask IRAN_BIND_IP "Bind IP on Iran VPS (0.0.0.0 = public)" "0.0.0.0"
         ask IRAN_PORT    "Port to open on Iran VPS (users connect here)" "8443"
-        # Check for port conflict with other mappings in this session
-        local _dup_port=false
-        for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
-            [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
-        done
-        if $_dup_port; then
-            warn "Port ${IRAN_PORT} is already used in a previous mapping above. Use a different port."
-        fi
         ask LOCAL_HOST   "Local host on this Foreign VPS (VPN service listens here)" "localhost"
         ask LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
         PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
@@ -1265,11 +1240,6 @@ flow_client() {
     done
     echo ""
     echo -e "  ${BOLD}3. Run Diagnose (option 3) to verify everything is working.${RESET}"
-    echo ""
-    echo -e "  ${YELLOW}MULTI-LOCATION REMINDER:${RESET}"
-    echo -e "  Each Foreign VPS must use a ${BOLD}unique${RESET} Iran VPS port."
-    echo -e "  This machine uses: ${CYAN}$(IFS=,; echo "${IRAN_PORTS[*]}")${RESET}"
-    echo -e "  Other Foreign VPS machines must use different port numbers."
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
     echo ""
