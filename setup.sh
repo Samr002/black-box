@@ -458,7 +458,7 @@ while i < len(lines):
             block.append(lines[i])
             i += 1
         block_text = '\n'.join(block)
-        if ('localhost:' + port) in block_text or ('127.0.0.1:' + port) in block_text:
+        if re.search(r'(?:localhost|127\.0\.0\.1):' + re.escape(port) + r'(?:\s|{|}|$)', block_text):
             print(domain)
     else:
         i += 1
@@ -1424,15 +1424,18 @@ flow_client() {
         count=$((count + 1))
         echo -e "  ${BOLD}── Mapping #${count} ──${RESET}"
         ask IRAN_BIND_IP "Bind IP on Iran VPS (0.0.0.0 = public)" "0.0.0.0"
-        ask IRAN_PORT    "Port to open on Iran VPS (users connect here)" "8443"
-        # Check for port conflict with other mappings in this session
-        local _dup_port=false
-        for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
-            [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
+        while true; do
+            ask IRAN_PORT "Port to open on Iran VPS (users connect here)" "8443"
+            local _dup_port=false
+            for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
+                [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
+            done
+            if $_dup_port; then
+                warn "Port ${IRAN_PORT} is already used in a previous mapping. Choose a different port."
+            else
+                break
+            fi
         done
-        if $_dup_port; then
-            warn "Port ${IRAN_PORT} is already used in a previous mapping above. Use a different port."
-        fi
         ask LOCAL_HOST   "Local host on this Foreign VPS (VPN service listens here)" "localhost"
         ask LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
         PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
@@ -1729,7 +1732,19 @@ edit_client() {
                 echo ""
                 echo -e "  ${BOLD}── New Port Mapping ──${RESET}"
                 ask IRAN_BIND_IP "Bind IP on Iran VPS" "0.0.0.0"
-                ask IRAN_PORT    "Port to open on Iran VPS" "8443"
+                while true; do
+                    ask IRAN_PORT "Port to open on Iran VPS" "8443"
+                    local _dup=false
+                    for _f in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
+                        local _ep; _ep=$(echo "${_f#tcp://}" | cut -d: -f2)
+                        [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break
+                    done
+                    if $_dup; then
+                        warn "Port ${IRAN_PORT} already exists in another mapping. Choose a different port."
+                    else
+                        break
+                    fi
+                done
                 ask LOCAL_HOST   "Local host on this Foreign VPS" "localhost"
                 ask LOCAL_PORT   "Local port on this Foreign VPS" "${IRAN_PORT}"
                 PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
@@ -1752,7 +1767,20 @@ edit_client() {
                     local oa="${PARSED_FLAGS[$idx]#tcp://}"
                     echo ""
                     ask IRAN_BIND_IP "Bind IP on Iran VPS"           "$(echo "$oa"|cut -d: -f1)"
-                    ask IRAN_PORT    "Port on Iran VPS"               "$(echo "$oa"|cut -d: -f2)"
+                    while true; do
+                        ask IRAN_PORT "Port on Iran VPS"             "$(echo "$oa"|cut -d: -f2)"
+                        local _dup=false
+                        for _fi in "${!PARSED_FLAGS[@]}"; do
+                            [ "$_fi" -eq "$idx" ] && continue
+                            local _ep; _ep=$(echo "${PARSED_FLAGS[$_fi]#tcp://}" | cut -d: -f2)
+                            [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break
+                        done
+                        if $_dup; then
+                            warn "Port ${IRAN_PORT} is used by another mapping. Choose a different port."
+                        else
+                            break
+                        fi
+                    done
                     ask LOCAL_HOST   "Local host on this Foreign VPS" "$(echo "$oa"|cut -d: -f3)"
                     ask LOCAL_PORT   "Local port on this Foreign VPS" "$(echo "$oa"|cut -d: -f4)"
                     PARSED_FLAGS[$idx]="tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
