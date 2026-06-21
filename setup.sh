@@ -1340,18 +1340,32 @@ flow_client() {
         confirm "  Reinstall / update it?" || _ca_already=true
     fi
     if ! $_ca_already; then
-        echo -e "  ${BOLD}Paste the cert content below (from Iran VPS), then press Ctrl+D:${RESET}"
-        local _ca_content
+        echo -e "  ${BOLD}Paste the cert content below (from Iran VPS), then press Ctrl+D on a new line:${RESET}"
+        local _ca_content _ca_tmp
+        _ca_tmp=$(mktemp)
         _ca_content=$(cat 2>/dev/null || true)
         if echo "$_ca_content" | grep -q "BEGIN CERTIFICATE"; then
-            echo "$_ca_content" > /usr/local/share/ca-certificates/caddy-iran-ca.crt
-            update-ca-certificates &>/dev/null
-            success "Caddy CA cert installed — TLS trust configured."
+            echo "$_ca_content" > "$_ca_tmp"
+            # Validate cert is parseable before touching system CA bundle
+            if openssl x509 -in "$_ca_tmp" -noout 2>/dev/null; then
+                cp "$_ca_tmp" /usr/local/share/ca-certificates/caddy-iran-ca.crt
+                chmod 644 /usr/local/share/ca-certificates/caddy-iran-ca.crt
+                if update-ca-certificates 2>/dev/null; then
+                    success "Caddy CA cert installed — TLS trust configured."
+                else
+                    warn "update-ca-certificates failed — trying --fresh..."
+                    update-ca-certificates --fresh 2>/dev/null || true
+                fi
+            else
+                warn "Cert failed OpenSSL validation — NOT installed (system CA bundle unchanged)."
+                echo -e "  ${YELLOW}Make sure you copied the full cert including BEGIN/END lines.${RESET}"
+            fi
         else
             warn "No valid cert pasted — skipping. Install manually later:"
             echo -e "  ${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt${RESET}"
             echo -e "  ${CYAN}update-ca-certificates${RESET}"
         fi
+        rm -f "$_ca_tmp"
     fi
 
     echo ""
