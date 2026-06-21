@@ -81,20 +81,22 @@ pick_action() {
     echo -e "  ${CYAN}3${RESET}) ${BOLD}Diagnose${RESET}  — check tunnel health layer by layer"
     echo -e "  ${CYAN}4${RESET}) ${BOLD}Edit${RESET}      — manage ports and domain on this machine"
     echo -e "  ${CYAN}5${RESET}) ${BOLD}Update${RESET}    — upgrade wstunnel binary to a newer version"
-    echo -e "  ${CYAN}6${RESET}) ${BOLD}Uninstall${RESET} — remove wstunnel completely from this machine"
-    echo -e "  ${CYAN}7${RESET}) ${BOLD}Exit${RESET}"
+    echo -e "  ${CYAN}6${RESET}) ${BOLD}Restart${RESET}   — manually restart all tunnel services"
+    echo -e "  ${CYAN}7${RESET}) ${BOLD}Uninstall${RESET} — remove wstunnel completely from this machine"
+    echo -e "  ${CYAN}8${RESET}) ${BOLD}Exit${RESET}"
     echo ""
     while true; do
-        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-8${RESET}: ")" choice
         case "$choice" in
             1) printf -v "$varname" 'server';    return ;;
             2) printf -v "$varname" 'client';    return ;;
             3) printf -v "$varname" 'diagnose';  return ;;
             4) printf -v "$varname" 'edit';      return ;;
             5) printf -v "$varname" 'update';    return ;;
-            6) printf -v "$varname" 'uninstall'; return ;;
-            7) echo ""; info "Goodbye."; exit 0 ;;
-            *) warn "  Please enter a number between 1 and 7." ;;
+            6) printf -v "$varname" 'restart';   return ;;
+            7) printf -v "$varname" 'uninstall'; return ;;
+            8) echo ""; info "Goodbye."; exit 0 ;;
+            *) warn "  Please enter a number between 1 and 8." ;;
         esac
     done
 }
@@ -2132,6 +2134,69 @@ flow_update() {
 }
 
 # ─────────────────────────────────────────────
+# Manual Restart
+# ─────────────────────────────────────────────
+flow_restart() {
+    echo ""
+    declare -a FOUND_SVCS=()
+    detect_services FOUND_SVCS
+
+    if [ ${#FOUND_SVCS[@]} -eq 0 ]; then
+        warn "No wstunnel services found on this machine."
+        return
+    fi
+
+    local has_server=false
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        [[ "$svc" == *server* ]] && has_server=true
+    done
+    local caddy_active=false
+    $has_server && systemctl is-enabled caddy &>/dev/null 2>&1 && caddy_active=true
+
+    echo -e "${BOLD}─── Services to restart ───────────────────────────────${RESET}"
+    echo ""
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        local st; st=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+        echo -e "  ${CYAN}${svc}${RESET}  [${st}]"
+    done
+    $caddy_active && echo -e "  ${CYAN}caddy.service${RESET}  [$(systemctl is-active caddy 2>/dev/null || echo inactive)]"
+    echo ""
+    confirm "Restart all services listed above?" || { info "Aborted."; return; }
+    echo ""
+
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        info "Restarting ${svc} ..."
+        if systemctl restart "$svc" 2>/dev/null; then
+            success "${svc} restarted."
+        else
+            warn "Failed to restart ${svc} — check: journalctl -u ${svc} -n 20"
+        fi
+    done
+
+    if $caddy_active; then
+        echo ""
+        info "Restarting Caddy..."
+        if systemctl restart caddy 2>/dev/null; then
+            success "Caddy restarted."
+        else
+            warn "Failed to restart Caddy — check: journalctl -u caddy -n 20"
+        fi
+    fi
+
+    echo ""
+    echo -e "${BOLD}─── Status ────────────────────────────────────────────${RESET}"
+    echo ""
+    for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
+        systemctl status "$svc" --no-pager -l 2>/dev/null | head -6
+        echo ""
+    done
+    if $caddy_active; then
+        systemctl status caddy --no-pager -l 2>/dev/null | head -6
+        echo ""
+    fi
+}
+
+# ─────────────────────────────────────────────
 # Uninstall
 # ─────────────────────────────────────────────
 flow_uninstall() {
@@ -2402,6 +2467,7 @@ main() {
             diagnose)  flow_diagnose;  _press_enter ;;
             edit)      flow_edit ;;
             update)    flow_update;    _press_enter ;;
+            restart)   flow_restart;   _press_enter ;;
             uninstall) flow_uninstall; exit 0 ;;
         esac
 
