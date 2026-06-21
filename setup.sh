@@ -2153,6 +2153,14 @@ flow_uninstall() {
     local ws_shortcut_exists=false
     [ -f "$WS_BIN" ] && ws_shortcut_exists=true
 
+    # ── CA cert detection (Foreign VPS) ─────────
+    local ca_cert_exists=false
+    ls /usr/local/share/ca-certificates/caddy*.crt &>/dev/null 2>&1 && ca_cert_exists=true
+
+    # ── sysctl tuning detection (Iran VPS) ──────
+    local sysctl_tuning_exists=false
+    grep -q "^net.ipv4.tcp_max_syn_backlog" /etc/sysctl.conf 2>/dev/null && sysctl_tuning_exists=true
+
     # Detect if this is an Iran VPS (server) install
     local has_server=false
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
@@ -2201,6 +2209,8 @@ flow_uninstall() {
     $server_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-server-restart.{timer,service}"
     $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
     $ws_shortcut_exists   && echo -e "  ${CYAN}ws shortcut${RESET}       ${WS_BIN}"
+    $ca_cert_exists       && echo -e "  ${CYAN}Caddy CA cert${RESET}     /usr/local/share/ca-certificates/caddy*.crt  (+ update-ca-certificates)"
+    $sysctl_tuning_exists && echo -e "  ${CYAN}sysctl tuning${RESET}     tcp_max_syn_backlog, netdev_max_backlog, tcp_tw_reuse, tcp_fin_timeout, tcp_syn_retries"
 
     if $caddy_ours_binary; then
         local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
@@ -2345,6 +2355,26 @@ PYEOF
     if $ws_shortcut_exists; then
         rm -f "$WS_BIN"
         success "Removed ${WS_BIN}"
+    fi
+
+    # ── 8. Caddy CA cert (Foreign VPS) ──────────
+    if $ca_cert_exists; then
+        info "Removing Caddy CA certificate from system trust store..."
+        rm -f /usr/local/share/ca-certificates/caddy*.crt
+        update-ca-certificates 2>/dev/null || true
+        success "Caddy CA cert removed and system CA bundle updated."
+    fi
+
+    # ── 9. sysctl tuning (Iran VPS) ─────────────
+    if $sysctl_tuning_exists; then
+        info "Removing kernel TCP tuning from /etc/sysctl.conf..."
+        local _sysctl_conf="/etc/sysctl.conf"
+        for _key in net.ipv4.tcp_max_syn_backlog net.core.netdev_max_backlog \
+                    net.ipv4.tcp_syn_retries net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse; do
+            sed -i "/^${_key}/d" "$_sysctl_conf" 2>/dev/null || true
+        done
+        sysctl -p &>/dev/null || true
+        success "Kernel TCP tuning parameters removed."
     fi
 
     echo ""
