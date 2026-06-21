@@ -227,11 +227,18 @@ configure_caddyfile() {
 
     mkdir -p "$(dirname "$caddyfile")"
 
+    local global_block
+    global_block='{
+    servers {
+        protocols h1 h2
+    }
+}'
+
     local block
     block="${domain} {
     tls internal
     header -Server
-    reverse_proxy localhost:${port} {
+    reverse_proxy 127.0.0.1:${port} {
         flush_interval -1
         transport http {
             response_header_timeout 0
@@ -241,7 +248,7 @@ configure_caddyfile() {
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
         # فایل وجود ندارد یا خالی است — از صفر بنویس
-        printf '%s\n' "$block" > "$caddyfile"
+        printf '%s\n\n%s\n' "$global_block" "$block" > "$caddyfile"
         success "Caddyfile created with domain ${domain}."
     elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
         # بلاک این دامنه از قبل وجود دارد — پورت را به‌روز کن
@@ -265,7 +272,7 @@ while i < len(lines):
             i += 1
         # Insert updated block as separate lines (no embedded \n)
         result.extend([f"{domain} {{", "    tls internal", "    header -Server",
-                        f"    reverse_proxy localhost:{port} {{",
+                        f"    reverse_proxy 127.0.0.1:{port} {{",
                         "        flush_interval -1",
                         "        transport http {",
                         "            response_header_timeout 0",
@@ -277,7 +284,7 @@ while i < len(lines):
         i += 1
 if not replaced:
     result.extend(["", f"{domain} {{", "    tls internal", "    header -Server",
-                   f"    reverse_proxy localhost:{port} {{",
+                   f"    reverse_proxy 127.0.0.1:{port} {{",
                    "        flush_interval -1",
                    "        transport http {",
                    "            response_header_timeout 0",
@@ -292,6 +299,10 @@ PYEOF
         success "Caddyfile updated for ${domain}."
     else
         # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
+        # اطمینان از وجود global block
+        if ! grep -q 'protocols h1 h2' "$caddyfile" 2>/dev/null; then
+            printf '%s\n\n' "$global_block" | cat - "$caddyfile" > "${caddyfile}.tmp" && mv "${caddyfile}.tmp" "$caddyfile"
+        fi
         printf '\n%s\n' "$block" >> "$caddyfile"
         success "Domain ${domain} added to Caddyfile."
     fi
