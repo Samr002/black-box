@@ -255,20 +255,17 @@ configure_caddyfile() {
 
     local block
     if [ -n "$upgrade_path" ]; then
-        # Path obfuscation: Caddy only accepts WebSocket upgrades to the secret path.
-        # wstunnel must NOT use --restrict-http-upgrade-path-prefix — it breaks ReverseTcp.
+        # Path obfuscation via Caddy handle block — only the secret path reaches wstunnel.
+        # Named-matcher with header conditions does not reliably match WebSocket upgrades.
         block="${domain} {
     tls internal
     header -Server
-    @wstunnel {
-        path ${upgrade_path}*
-        header Connection *Upgrade*
-        header Upgrade websocket
-    }
-    reverse_proxy @wstunnel 127.0.0.1:${port} {
-        flush_interval -1
-        transport http {
-            response_header_timeout 0
+    handle ${upgrade_path}* {
+        reverse_proxy 127.0.0.1:${port} {
+            flush_interval -1
+            transport http {
+                response_header_timeout 0
+            }
         }
     }
     respond 404
@@ -458,11 +455,11 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    # Path restriction lives in Caddyfile (@wstunnel path matcher), not in wstunnel flags
+    # Path restriction lives in Caddyfile (handle block), not in wstunnel flags
     local _caddyfile="/etc/caddy/Caddyfile"
     PARSED_UPGRADE_PATH=""
     [ -f "$_caddyfile" ] && \
-        PARSED_UPGRADE_PATH=$(sed -n 's/[[:space:]]*path \(\/[^* ]*\)\*.*/\1/p' "$_caddyfile" | head -1)
+        PARSED_UPGRADE_PATH=$(sed -n 's/[[:space:]]*handle \(\/[^* ]*\)\*.*/\1/p' "$_caddyfile" | head -1)
 }
 
 parse_server_domains() {
