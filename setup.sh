@@ -236,7 +236,7 @@ CADDY_SVC
 
 # نوشتن یا به‌روز‌رسانی بلاک دامنه در Caddyfile
 configure_caddyfile() {
-    local domain="$1" port="$2"
+    local domain="$1" port="$2" upgrade_path="${3:-}"
     local caddyfile="/etc/caddy/Caddyfile"
 
     mkdir -p "$(dirname "$caddyfile")"
@@ -254,7 +254,27 @@ configure_caddyfile() {
 }'
 
     local block
-    block="${domain} {
+    if [ -n "$upgrade_path" ]; then
+        # Path obfuscation: Caddy only accepts WebSocket upgrades to the secret path.
+        # wstunnel must NOT use --restrict-http-upgrade-path-prefix — it breaks ReverseTcp.
+        block="${domain} {
+    tls internal
+    header -Server
+    @wstunnel {
+        path ${upgrade_path}*
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @wstunnel 127.0.0.1:${port} {
+        flush_interval -1
+        transport http {
+            response_header_timeout 0
+        }
+    }
+    respond 404
+}"
+    else
+        block="${domain} {
     tls internal
     header -Server
     reverse_proxy 127.0.0.1:${port} {
@@ -264,57 +284,49 @@ configure_caddyfile() {
         }
     }
 }"
+    fi
 
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
         # فایل وجود ندارد یا خالی است — از صفر بنویس
         printf '%s\n\n%s\n' "$global_block" "$block" > "$caddyfile"
         success "Caddyfile created with domain ${domain}."
     elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
-        # بلاک این دامنه از قبل وجود دارد — پورت را به‌روز کن
-        info "Updating ${domain} in Caddyfile (port → ${port})..."
-        python3 - "$caddyfile" "$domain" "$port" <<'PYEOF'
+        # بلاک این دامنه از قبل وجود دارد — با block جدید جایگزین کن
+        info "Updating ${domain} in Caddyfile..."
+        local _block_tmp; _block_tmp=$(mktemp)
+        printf '%s\n' "$block" > "$_block_tmp"
+        python3 - "$caddyfile" "$domain" "$_block_tmp" <<'PYEOF'
 import sys, re
-path, domain, port = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    content = f.read()
-lines = content.split('\n')
+cfile, domain, block_file = sys.argv[1], sys.argv[2], sys.argv[3]
+with open(block_file) as f:
+    new_block_lines = f.read().rstrip('\n').split('\n')
+with open(cfile) as f:
+    lines = f.read().split('\n')
 result = []
 i = 0
 replaced = False
 dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
-    if dom_pat.match(lines[i]):
+    if not replaced and dom_pat.match(lines[i]):
         depth = lines[i].count('{') - lines[i].count('}')
         i += 1
         while i < len(lines) and depth > 0:
             depth += lines[i].count('{') - lines[i].count('}')
             i += 1
-        # Insert updated block as separate lines (no embedded \n)
-        result.extend([f"{domain} {{", "    tls internal", "    header -Server",
-                        f"    reverse_proxy 127.0.0.1:{port} {{",
-                        "        flush_interval -1",
-                        "        transport http {",
-                        "            response_header_timeout 0",
-                        "        }",
-                        "    }", "}"])
+        result.extend(new_block_lines)
         replaced = True
     else:
         result.append(lines[i])
         i += 1
 if not replaced:
-    result.extend(["", f"{domain} {{", "    tls internal", "    header -Server",
-                   f"    reverse_proxy 127.0.0.1:{port} {{",
-                   "        flush_interval -1",
-                   "        transport http {",
-                   "            response_header_timeout 0",
-                   "        }",
-                   "    }", "}"])
+    result.extend([''] + new_block_lines)
 output = '\n'.join(result)
 if not output.endswith('\n'):
     output += '\n'
-with open(path, 'w') as f:
+with open(cfile, 'w') as f:
     f.write(output)
 PYEOF
+        rm -f "$_block_tmp"
         success "Caddyfile updated for ${domain}."
     else
         # فایل وجود دارد و دامنه دیگری دارد — اضافه کن
@@ -446,7 +458,11 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--restrict-http-upgrade-path-prefix \([^ ]*\).*/\1/p')
+    # Path restriction lives in Caddyfile (@wstunnel path matcher), not in wstunnel flags
+    local _caddyfile="/etc/caddy/Caddyfile"
+    PARSED_UPGRADE_PATH=""
+    [ -f "$_caddyfile" ] && \
+        PARSED_UPGRADE_PATH=$(sed -n 's/[[:space:]]*path \(\/[^* ]*\)\*.*/\1/p' "$_caddyfile" | head -1)
 }
 
 parse_server_domains() {
@@ -588,7 +604,8 @@ EOF
 
 write_server_service() {
     local exec_flags="--websocket-ping-frequency-sec 30"
-    [ -n "${PARSED_UPGRADE_PATH:-}" ] && exec_flags+=" --restrict-http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
+    # Path restriction is handled by Caddy, not wstunnel — --restrict-http-upgrade-path-prefix
+    # breaks ReverseTcp connections in wstunnel v10, so path routing lives in the Caddyfile.
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -858,13 +875,20 @@ diagnose_server() {
         check_warn "No firewall tool detected (ufw/iptables)"
     fi
 
-    # 11. بررسی مستقیم service file برای --restrict-to
+    # 11. بررسی مستقیم service file برای flags ناسازگار با ReverseTcp
     local svc_file="/etc/systemd/system/wstunnel-server.service"
     if [ -f "$svc_file" ] && grep -q -- '--restrict-to' "$svc_file"; then
         check_fail "--restrict-to found in service file — this BLOCKS all reverse tunnel (-R) connections"
-        echo -e "         ${RED}wstunnel v10 --restrict-to only allows forward Tcp, not ReverseTcp.${RESET}"
+        echo -e "         ${RED}wstunnel v10 --restrict-to blocks ALL ReverseTcp regardless of destination.${RESET}"
         echo -e "         ${YELLOW}→ Fix now:${RESET}"
         echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' ${svc_file}${RESET}"
+        echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
+    fi
+    if [ -f "$svc_file" ] && grep -q -- '--restrict-http-upgrade-path-prefix' "$svc_file"; then
+        check_fail "--restrict-http-upgrade-path-prefix in wstunnel service — also BLOCKS ReverseTcp in v10"
+        echo -e "         ${RED}Path restriction must be done in Caddy, not wstunnel (wstunnel flag breaks -R).${RESET}"
+        echo -e "         ${YELLOW}→ Fix now:${RESET}"
+        echo -e "         ${CYAN}   sed -i 's/ --restrict-http-upgrade-path-prefix [^ ]*//g' ${svc_file}${RESET}"
         echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
     fi
 
@@ -1010,12 +1034,14 @@ diagnose_client() {
             ;;
         "400")
             https_reachable=true
-            check_fail "Iran VPS returns 400 — wstunnel is rejecting the WebSocket upgrade"
-            echo -e "         ${RED}Most likely: --restrict-to or --restrict-http-upgrade-path-prefix flag on Iran VPS${RESET}"
-            echo -e "         ${YELLOW}→ On Iran VPS remove --restrict-to:${RESET}"
-            echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
-            echo -e "         ${YELLOW}→ Also remove --restrict-http-upgrade-path-prefix if present:${RESET}"
-            echo -e "         ${CYAN}   sed -i 's/ --restrict-http-upgrade-path-prefix [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
+            check_fail "Iran VPS returns 400 — wstunnel or Caddy is rejecting the connection"
+            echo -e "         ${RED}Most likely causes:${RESET}"
+            echo -e "         ${RED}  1. --restrict-to flag in wstunnel-server.service (blocks ReverseTcp)${RESET}"
+            echo -e "         ${RED}  2. --restrict-http-upgrade-path-prefix in wstunnel-server.service (incompatible with -R)${RESET}"
+            echo -e "         ${RED}  3. Caddy path matcher not matching client upgrade path${RESET}"
+            echo -e "         ${YELLOW}→ On Iran VPS check/fix wstunnel service:${RESET}"
+            echo -e "         ${CYAN}   grep ExecStart /etc/systemd/system/wstunnel-server.service${RESET}"
+            echo -e "         ${CYAN}   sed -i 's/ --restrict-to [^ ]*//g; s/ --restrict-http-upgrade-path-prefix [^ ]*//g' /etc/systemd/system/wstunnel-server.service${RESET}"
             echo -e "         ${CYAN}   systemctl daemon-reload && systemctl restart wstunnel-server.service${RESET}"
             wstunnel_rejecting=true
             ;;
@@ -1365,7 +1391,7 @@ flow_server() {
     echo -e "${BOLD}─── Caddy ─────────────────────────────────────────────${RESET}"
     install_caddy
     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-        configure_caddyfile "$dom" "$PARSED_BIND_PORT"
+        configure_caddyfile "$dom" "$PARSED_BIND_PORT" "${PARSED_UPGRADE_PATH:-}"
     done
 
     info "Enabling and starting Caddy..."
@@ -1768,11 +1794,13 @@ edit_server() {
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     svc_changed=true
                 fi
-                grep -q "restrict-http-upgrade-path-prefix" /etc/systemd/system/wstunnel-server.service 2>/dev/null && {
-                    local _cur_path
-                    _cur_path=$(sed -n 's/.*--restrict-http-upgrade-path-prefix \([^ ]*\).*/\1/p' /etc/systemd/system/wstunnel-server.service)
-                    [ "$_cur_path" != "$PARSED_UPGRADE_PATH" ] && svc_changed=true
-                } || { [ -n "$PARSED_UPGRADE_PATH" ] && svc_changed=true; }
+                # Path obfuscation is now in Caddyfile — check if it changed
+                local _cur_caddy_path=""
+                [ -f "/etc/caddy/Caddyfile" ] && \
+                    _cur_caddy_path=$(sed -n 's/[[:space:]]*path \(\/[^* ]*\)\*.*/\1/p' /etc/caddy/Caddyfile | head -1)
+                local caddy_path_changed=false
+                [ "$_cur_caddy_path" != "${PARSED_UPGRADE_PATH:-}" ] && caddy_path_changed=true
+
                 local port_changed=false
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     port_changed=true
@@ -1785,13 +1813,13 @@ edit_server() {
                 done
 
                 # 3. بعد دامنه‌های جدید رو اضافه/آپدیت کن
-                if $port_changed; then
+                if $port_changed || $caddy_path_changed; then
                     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
-                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_UPGRADE_PATH:-}"
                     done
                 else
                     for dom in "${ADDED_DOMAINS[@]+"${ADDED_DOMAINS[@]}"}"; do
-                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
+                        configure_caddyfile "$dom" "${PARSED_BIND_PORT}" "${PARSED_UPGRADE_PATH:-}"
                     done
                 fi
 
