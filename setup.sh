@@ -49,6 +49,7 @@ declare -a PARSED_FLAGS=()
 PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
 declare -a PARSED_DOMAINS=()
+PARSED_UPGRADE_PATH=""
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -130,6 +131,17 @@ wstunnel_bin() {
     elif command -v wstunnel &>/dev/null;  then command -v wstunnel
     else echo ""
     fi
+}
+
+# تولید path تصادفی شبیه API واقعی برای obfuscation
+gen_upgrade_path() {
+    local seg1 seg2 hex
+    local segs1=("api" "v1" "v2" "app" "ws" "live" "svc" "net")
+    local segs2=("stream" "connect" "socket" "data" "relay" "pipe" "link" "sync")
+    seg1="${segs1[$((RANDOM % ${#segs1[@]}))]}"
+    seg2="${segs2[$((RANDOM % ${#segs2[@]}))]}"
+    hex=$(printf '%06x' $((RANDOM * RANDOM % 16777216)))
+    echo "/${seg1}/${seg2}/${hex}"
 }
 
 # مسیر دقیق باینری caddy را برمی‌گرداند
@@ -401,17 +413,21 @@ setup_user() {
 # ─────────────────────────────────────────────
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
-    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=()
+    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH=""
     if [ ! -f "$svc_file" ]; then
         warn "Client service file not found — some values will be empty"
         return
     fi
-    local exec_line wss_url
+    local exec_line wss_url host_port
     exec_line=$(grep "^ExecStart=" "$svc_file" | sed 's/^ExecStart=//')
     wss_url=$(echo "$exec_line" | grep -oE 'wss://[^[:space:]]+')
-    PARSED_DOMAIN=$(echo "$wss_url"   | sed 's|wss://||' | sed 's|:[0-9]*$||')
-    PARSED_WSS_PORT=$(echo "$wss_url" | grep -oE '[0-9]+$')
+    # Extract host:port separately from path to avoid port regex matching path digits
+    host_port=$(echo "$wss_url" | sed 's|wss://||' | cut -d'/' -f1)
+    PARSED_DOMAIN=$(echo "$host_port" | cut -d':' -f1)
+    PARSED_WSS_PORT=$(echo "$host_port" | cut -d':' -f2)
     [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443"
+    # Path is everything after host:port (may be empty)
+    PARSED_UPGRADE_PATH=$(echo "$wss_url" | sed 's|wss://[^/]*||')
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
@@ -420,7 +436,7 @@ parse_client_service() {
 
 parse_server_service() {
     local svc_file="/etc/systemd/system/wstunnel-server.service"
-    PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018"
+    PARSED_BIND_IP="127.0.0.1" PARSED_BIND_PORT="2018" PARSED_UPGRADE_PATH=""
     if [ ! -f "$svc_file" ]; then
         warn "Server service file not found — using default values for diagnostics"
         return
@@ -430,6 +446,7 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
+    PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p')
 }
 
 parse_server_domains() {
@@ -472,7 +489,12 @@ PYEOF
 # Display / build helpers
 # ─────────────────────────────────────────────
 show_client_state() {
-    echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${RESET}"
+    echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${PARSED_UPGRADE_PATH}${RESET}"
+    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
+        echo -e "  ${BOLD}Upgrade path    :${RESET}  ${GREEN}${PARSED_UPGRADE_PATH}${RESET}  ${CYAN}(obfuscation active)${RESET}"
+    else
+        echo -e "  ${BOLD}Upgrade path    :${RESET}  ${YELLOW}(none — obfuscation disabled)${RESET}"
+    fi
     echo ""
     echo -e "  ${BOLD}Port mappings:${RESET}"
     if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
@@ -492,6 +514,11 @@ show_client_state() {
 
 show_server_state() {
     echo -e "  ${BOLD}wstunnel listens :${RESET}  ${YELLOW}ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}${RESET}"
+    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
+        echo -e "  ${BOLD}Upgrade path     :${RESET}  ${GREEN}${PARSED_UPGRADE_PATH}${RESET}  ${CYAN}(obfuscation active)${RESET}"
+    else
+        echo -e "  ${BOLD}Upgrade path     :${RESET}  ${YELLOW}(none — obfuscation disabled)${RESET}"
+    fi
     echo ""
     echo -e "  ${BOLD}Domains (Caddyfile):${RESET}"
     if [ ${#PARSED_DOMAINS[@]} -eq 0 ]; then
@@ -507,10 +534,16 @@ build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
     result+=" --connection-min-idle 5"
+    result+=" --dns-resolver dns://1.1.1.1"
+    result+=" --http-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
+    result+=" --http-headers \"Origin: https://${PARSED_DOMAIN}\""
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
-    result+=" wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}"
+    # Append upgrade path to WSS URL if configured
+    local wss_url="wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}"
+    [ -n "${PARSED_UPGRADE_PATH:-}" ] && wss_url+="${PARSED_UPGRADE_PATH}"
+    result+=" ${wss_url}"
     echo "$result"
 }
 
@@ -555,6 +588,7 @@ EOF
 
 write_server_service() {
     local exec_flags="--websocket-ping-frequency-sec 30"
+    [ -n "${PARSED_UPGRADE_PATH:-}" ] && exec_flags+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -1282,6 +1316,21 @@ flow_server() {
     done
 
     echo ""
+    echo -e "${BOLD}─── Anti-Detection / Obfuscation ──────────────────────${RESET}"
+    echo -e "  ${YELLOW}A custom WebSocket upgrade path makes tunnel traffic look like a${RESET}"
+    echo -e "  ${YELLOW}regular HTTPS API call — harder for DPI to detect and block.${RESET}"
+    echo -e "  ${YELLOW}Each Foreign VPS client MUST use the EXACT SAME path.${RESET}"
+    echo ""
+    local _gen_path; _gen_path=$(gen_upgrade_path)
+    echo -e "  ${CYAN}Auto-generated path example: ${_gen_path}${RESET}"
+    echo ""
+    ask PARSED_UPGRADE_PATH "WebSocket upgrade path (Enter to use generated, leave blank to disable)" "${_gen_path}"
+    # Normalize: ensure leading slash or empty
+    if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
+        PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
+    fi
+
+    echo ""
     echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
     echo -e "  ${YELLOW}Periodic restart keeps the tunnel fresh and clears stale connections.${RESET}"
     local SERVER_RESTART_HOURS
@@ -1391,6 +1440,16 @@ flow_client() {
     echo -e "${BOLD}─── Iran VPS connection ───────────────────────────────${RESET}"
     ask PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)" ""
     ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
+
+    echo ""
+    echo -e "${BOLD}─── Anti-Detection / Obfuscation ──────────────────────${RESET}"
+    echo -e "  ${YELLOW}Enter the WebSocket upgrade path configured on the Iran VPS server.${RESET}"
+    echo -e "  ${YELLOW}Leave empty ONLY if the server was set up without a path.${RESET}"
+    echo ""
+    ask PARSED_UPGRADE_PATH "WebSocket upgrade path (copy from Iran VPS setup, or leave blank)" ""
+    if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
+        PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
+    fi
 
     echo ""
     echo -e "${BOLD}─── Caddy CA Certificate (TLS Trust) ──────────────────${RESET}"
@@ -1567,13 +1626,14 @@ edit_server() {
         echo -e "  ${CYAN}1${RESET}) Add domain"
         echo -e "  ${CYAN}2${RESET}) Remove domain"
         echo -e "  ${CYAN}3${RESET}) Change bind IP / port"
-        echo -e "  ${CYAN}4${RESET}) Configure scheduled restart"
-        echo -e "  ${CYAN}5${RESET}) Apply changes"
-        echo -e "  ${CYAN}6${RESET}) Back to main menu"
+        echo -e "  ${CYAN}4${RESET}) Change WebSocket upgrade path (obfuscation)"
+        echo -e "  ${CYAN}5${RESET}) Configure scheduled restart"
+        echo -e "  ${CYAN}6${RESET}) Apply changes"
+        echo -e "  ${CYAN}7${RESET}) Back to main menu"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-6${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1645,6 +1705,31 @@ edit_server() {
                 fi
                 ;;
             4)
+                echo ""
+                echo -e "  ${YELLOW}Current path: ${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
+                echo -e "  ${YELLOW}Leave blank to disable obfuscation. Must match all Foreign VPS clients.${RESET}"
+                echo ""
+                local _auto_path; _auto_path=$(gen_upgrade_path)
+                echo -e "  ${CYAN}Auto-generated: ${_auto_path}${RESET}"
+                local NEW_PATH
+                ask NEW_PATH "New WebSocket upgrade path (or leave blank to disable)" "${PARSED_UPGRADE_PATH}"
+                if [ -n "$NEW_PATH" ] && [[ "$NEW_PATH" != /* ]]; then
+                    NEW_PATH="/${NEW_PATH}"
+                fi
+                if [ "$NEW_PATH" != "$PARSED_UPGRADE_PATH" ]; then
+                    PARSED_UPGRADE_PATH="$NEW_PATH"
+                    changed=true
+                    if [ -n "$PARSED_UPGRADE_PATH" ]; then
+                        success "Upgrade path set to: ${PARSED_UPGRADE_PATH}"
+                        warn "Update all Foreign VPS clients to use this path!"
+                    else
+                        success "Upgrade path disabled."
+                    fi
+                else
+                    info "No changes."
+                fi
+                ;;
+            5)
                 local cur_h; cur_h=$(get_restart_interval "server")
                 ask_restart_interval NEW_RESTART_H "$cur_h"
                 if [ "$NEW_RESTART_H" = "0" ]; then
@@ -1655,7 +1740,7 @@ edit_server() {
                     info "No changes to restart timer."
                 fi
                 ;;
-            5)
+            6)
                 ! $changed && { info "No changes to apply."; continue; }
                 echo ""
                 echo -e "${BOLD}─── Changes Summary ───────────────────────────────────${RESET}"
@@ -1678,12 +1763,21 @@ edit_server() {
                 confirm "Apply changes?" || continue
                 echo ""
 
-                # 1. wstunnel service — فقط اگه bind address تغییر کرده
+                # 1. wstunnel service — اگه bind address یا upgrade path تغییر کرده
+                local svc_changed=false
+                if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
+                    svc_changed=true
+                fi
+                grep -q "http-upgrade-path-prefix" /etc/systemd/system/wstunnel-server.service 2>/dev/null && {
+                    local _cur_path
+                    _cur_path=$(sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p' /etc/systemd/system/wstunnel-server.service)
+                    [ "$_cur_path" != "$PARSED_UPGRADE_PATH" ] && svc_changed=true
+                } || { [ -n "$PARSED_UPGRADE_PATH" ] && svc_changed=true; }
                 local port_changed=false
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
-                    write_server_service
                     port_changed=true
                 fi
+                $svc_changed && write_server_service
 
                 # 2. اول دامنه‌های حذفی رو از Caddyfile بردار (بدون دست زدن به بقیه)
                 for dom in "${DOMAINS_TO_REMOVE[@]+"${DOMAINS_TO_REMOVE[@]}"}"; do
@@ -1691,8 +1785,6 @@ edit_server() {
                 done
 
                 # 3. بعد دامنه‌های جدید رو اضافه/آپدیت کن
-                # اگه پورت عوض شده: همه دامنه‌های باقیمونده رو آپدیت کن
-                # اگه پورت نعوض نشده: فقط دامنه‌های تازه‌اضافه‌شده رو configure کن
                 if $port_changed; then
                     for dom in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
                         configure_caddyfile "$dom" "${PARSED_BIND_PORT}"
@@ -1720,10 +1812,10 @@ edit_server() {
                 fi
                 return
                 ;;
-            6)
+            7)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 6." ;;
+                warn "Please enter a number between 1 and 7." ;;
         esac
     done
 }
@@ -1748,13 +1840,14 @@ edit_client() {
         echo -e "  ${CYAN}2${RESET}) Edit an existing port mapping"
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
-        echo -e "  ${CYAN}5${RESET}) Configure scheduled restart"
-        echo -e "  ${CYAN}6${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}7${RESET}) Back to main menu (discard changes)"
+        echo -e "  ${CYAN}5${RESET}) Change WebSocket upgrade path (obfuscation)"
+        echo -e "  ${CYAN}6${RESET}) Configure scheduled restart"
+        echo -e "  ${CYAN}7${RESET}) Apply changes and restart service"
+        echo -e "  ${CYAN}8${RESET}) Back to main menu (discard changes)"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-7${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-8${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -1855,6 +1948,24 @@ edit_client() {
                 fi
                 ;;
             5)
+                echo ""
+                echo -e "  ${YELLOW}Current path: ${PARSED_UPGRADE_PATH:-"(none)"}${RESET}"
+                echo -e "  ${YELLOW}Must match the upgrade path configured on the Iran VPS server.${RESET}"
+                echo ""
+                local NEW_CLIENT_PATH
+                ask NEW_CLIENT_PATH "WebSocket upgrade path (or leave blank to disable)" "${PARSED_UPGRADE_PATH}"
+                if [ -n "$NEW_CLIENT_PATH" ] && [[ "$NEW_CLIENT_PATH" != /* ]]; then
+                    NEW_CLIENT_PATH="/${NEW_CLIENT_PATH}"
+                fi
+                if [ "$NEW_CLIENT_PATH" != "$PARSED_UPGRADE_PATH" ]; then
+                    PARSED_UPGRADE_PATH="$NEW_CLIENT_PATH"
+                    changed=true
+                    [ -n "$PARSED_UPGRADE_PATH" ] && success "Upgrade path set to: ${PARSED_UPGRADE_PATH}" || success "Upgrade path disabled."
+                else
+                    info "No changes."
+                fi
+                ;;
+            6)
                 local cur_hc; cur_hc=$(get_restart_interval "client")
                 ask_restart_interval NEW_RESTART_HC "$cur_hc"
                 if [ "$NEW_RESTART_HC" = "0" ]; then
@@ -1865,7 +1976,7 @@ edit_client() {
                     info "No changes to restart timer."
                 fi
                 ;;
-            6)
+            7)
                 ! $changed && { info "No changes to apply."; continue; }
                 if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
                     warn "No port mappings configured — wstunnel will start with no -R flags."
@@ -1893,10 +2004,10 @@ edit_client() {
                 fi
                 return
                 ;;
-            7)
+            8)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 7." ;;
+                warn "Please enter a number between 1 and 8." ;;
         esac
     done
 }
