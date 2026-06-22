@@ -446,7 +446,7 @@ parse_server_service() {
     ws_url=$(echo "$exec_line" | grep -oE 'ws://[^[:space:]]+')
     PARSED_BIND_IP=$(echo "$ws_url"   | sed 's|ws://||' | sed 's|:[0-9]*$||')
     PARSED_BIND_PORT=$(echo "$ws_url" | grep -oE '[0-9]+$')
-    PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p')
+    PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--restrict-http-upgrade-path-prefix \([^ ]*\).*/\1/p')
 }
 
 parse_server_domains() {
@@ -588,7 +588,7 @@ EOF
 
 write_server_service() {
     local exec_flags="--websocket-ping-frequency-sec 30"
-    [ -n "${PARSED_UPGRADE_PATH:-}" ] && exec_flags+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
+    [ -n "${PARSED_UPGRADE_PATH:-}" ] && exec_flags+=" --restrict-http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
@@ -1768,9 +1768,9 @@ edit_server() {
                 if [ "${PARSED_BIND_IP}" != "${old_ip}" ] || [ "${PARSED_BIND_PORT}" != "${old_port}" ]; then
                     svc_changed=true
                 fi
-                grep -q "http-upgrade-path-prefix" /etc/systemd/system/wstunnel-server.service 2>/dev/null && {
+                grep -q "restrict-http-upgrade-path-prefix" /etc/systemd/system/wstunnel-server.service 2>/dev/null && {
                     local _cur_path
-                    _cur_path=$(sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p' /etc/systemd/system/wstunnel-server.service)
+                    _cur_path=$(sed -n 's/.*--restrict-http-upgrade-path-prefix \([^ ]*\).*/\1/p' /etc/systemd/system/wstunnel-server.service)
                     [ "$_cur_path" != "$PARSED_UPGRADE_PATH" ] && svc_changed=true
                 } || { [ -n "$PARSED_UPGRADE_PATH" ] && svc_changed=true; }
                 local port_changed=false
