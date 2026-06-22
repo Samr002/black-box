@@ -2390,7 +2390,8 @@ flow_uninstall() {
 
     # ── CA cert detection (Foreign VPS) ─────────
     local ca_cert_exists=false
-    ls /usr/local/share/ca-certificates/caddy*.crt &>/dev/null 2>&1 && ca_cert_exists=true
+    { ls /usr/local/share/ca-certificates/caddy*.crt &>/dev/null 2>&1 \
+      || ls /etc/ssl/certs/caddy*.pem &>/dev/null 2>&1; } && ca_cert_exists=true
 
     # ── sysctl tuning detection (Iran VPS) ──────
     local sysctl_tuning_exists=false
@@ -2428,7 +2429,7 @@ flow_uninstall() {
     if [ ${#FOUND_SVCS[@]} -eq 0 ] && ! $wstunnel_bin_exists && ! $wstunnel_user_exists \
         && ! $caddy_ours_binary && ! $caddy_ours_apt \
         && ! $server_timer_exists && ! $client_timer_exists \
-        && ! $ws_shortcut_exists; then
+        && ! $ws_shortcut_exists && ! $ca_cert_exists && ! $sysctl_tuning_exists; then
         info "Nothing to remove — wstunnel is not installed on this machine."; return
     fi
 
@@ -2596,6 +2597,7 @@ PYEOF
     if $ca_cert_exists; then
         info "Removing Caddy CA certificate from system trust store..."
         rm -f /usr/local/share/ca-certificates/caddy*.crt
+        rm -f /etc/ssl/certs/caddy*.pem
         update-ca-certificates 2>/dev/null || true
         success "Caddy CA cert removed and system CA bundle updated."
     fi
