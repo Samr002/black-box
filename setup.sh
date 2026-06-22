@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh"
-WS_BIN="/usr/local/bin/ws"
+WS_BIN="/usr/local/bin/ws-v2"
 
 # ─────────────────────────────────────────────
 # Colors
@@ -851,7 +851,7 @@ diagnose_server() {
     echo ""
     echo -e "  ${BOLD}ws Command:${RESET}"
     if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
-        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
+        check_ok "'ws-v2' shortcut installed at ${WS_BIN}  (type 'ws-v2' to relaunch)"
     else
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
@@ -1129,7 +1129,7 @@ diagnose_client() {
     echo ""
     echo -e "  ${BOLD}ws Command:${RESET}"
     if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
-        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
+        check_ok "'ws-v2' shortcut installed at ${WS_BIN}  (type 'ws-v2' to relaunch)"
     else
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
@@ -2128,15 +2128,15 @@ flow_edit() {
     fi
 }
 
-# Install / refresh the `ws` shortcut in /usr/local/bin/ws
+# Install / refresh the `ws-v2` shortcut in /usr/local/bin/ws-v2
 install_ws_command() {
-    info "Installing 'ws' command shortcut..."
+    info "Installing 'ws-v2' command shortcut..."
     cat > "$WS_BIN" <<'WSEOF'
 #!/bin/bash
-exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh") "$@"
+exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh") "$@"
 WSEOF
     chmod +x "$WS_BIN"
-    success "Shortcut installed: type 'ws' from anywhere to launch this script."
+    success "Shortcut installed: type 'ws-v2' from anywhere to launch this script."
 }
 
 # Update Caddy binary to the latest pinned version
@@ -2300,7 +2300,7 @@ flow_update() {
     local cb; cb=$(caddy_bin)
     $do_wstunnel && [ -n "$wb" ] && info "  wstunnel : $("$wb" --version 2>&1 | head -n1)"
     $do_caddy    && [ -n "$cb" ] && info "  Caddy    : $("$cb" version 2>/dev/null | head -n1)"
-    $do_script   && info "  ws       : ${WS_BIN}  (type 'ws' to relaunch)"
+    $do_script   && info "  ws-v2    : ${WS_BIN}  (type 'ws-v2' to relaunch)"
 }
 
 # ─────────────────────────────────────────────
@@ -2444,7 +2444,7 @@ flow_uninstall() {
     $wstunnel_user_exists && echo -e "  ${CYAN}wstunnel user${RESET}     wstunnel  +  /home/wstunnel/"
     $server_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-server-restart.{timer,service}"
     $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
-    $ws_shortcut_exists   && echo -e "  ${CYAN}ws shortcut${RESET}       ${WS_BIN}"
+    $ws_shortcut_exists   && echo -e "  ${CYAN}ws-v2 shortcut${RESET}    ${WS_BIN}"
     $ca_cert_exists       && echo -e "  ${CYAN}Caddy CA cert${RESET}     /usr/local/share/ca-certificates/caddy*.crt  (+ update-ca-certificates)"
     $sysctl_tuning_exists && echo -e "  ${CYAN}sysctl tuning${RESET}     tcp_max_syn_backlog, netdev_max_backlog, tcp_tw_reuse, tcp_fin_timeout, tcp_syn_retries"
 

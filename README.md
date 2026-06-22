@@ -39,11 +39,11 @@ Run this **once** on either VPS — the script detects the appropriate role auto
 bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)
 ```
 
-After the first install, a `ws` shortcut is placed at `/usr/local/bin/ws`.
+After the first install, a `ws-v2` shortcut is placed at `/usr/local/bin/ws-v2`.
 From that point on, just run:
 
 ```bash
-ws
+ws-v2
 ```
 
 ---
@@ -69,7 +69,7 @@ ws
 | Foreign VPS | wstunnel (client mode) | Connects outbound via `wss://domain:443` |
 | Foreign VPS | Caddy CA cert | Iran VPS self-signed CA installed in system trust store |
 | Foreign VPS | systemd service | `wstunnel-client.service` — auto-starts on boot |
-| Both | `ws` shortcut | `/usr/local/bin/ws` — reruns latest script from GitHub |
+| Both | `ws-v2` shortcut | `/usr/local/bin/ws-v2` — reruns latest script from GitHub |
 
 ---
 
@@ -216,7 +216,7 @@ What would you like to do?
 
 ```bash
 # Relaunch the setup menu
-ws
+ws-v2
 
 # Service status
 systemctl status wstunnel-server.service   # Iran VPS
@@ -315,7 +315,7 @@ ws
 | سرور خارج | wstunnel (حالت کلاینت) | از طریق `wss://domain:443` به خارج متصل می‌شود |
 | سرور خارج | CA cert کادی | گواهی CA سرور ایران در trust store سیستم نصب می‌شود |
 | سرور خارج | سرویس systemd | `wstunnel-client.service` — هنگام بوت خودکار اجرا می‌شود |
-| هر دو | میانبر `ws` | `/usr/local/bin/ws` — آخرین اسکریپت را از GitHub اجرا می‌کند |
+| هر دو | میانبر `ws-v2` | `/usr/local/bin/ws-v2` — آخرین اسکریپت را از GitHub اجرا می‌کند |
 
 ---
 
@@ -460,7 +460,7 @@ What would you like to do?
 
 ```bash
 # اجرای مجدد منوی اسکریپت
-ws
+ws-v2
 
 # وضعیت سرویس‌ها
 systemctl status wstunnel-server.service   # سرور ایران
