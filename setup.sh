@@ -426,8 +426,8 @@ parse_client_service() {
     PARSED_DOMAIN=$(echo "$host_port" | cut -d':' -f1)
     PARSED_WSS_PORT=$(echo "$host_port" | cut -d':' -f2)
     [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443"
-    # Path is everything after host:port (may be empty)
-    PARSED_UPGRADE_PATH=$(echo "$wss_url" | sed 's|wss://[^/]*||')
+    # Path comes from --http-upgrade-path-prefix flag (not the URL path)
+    PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p')
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
@@ -489,7 +489,7 @@ PYEOF
 # Display / build helpers
 # ─────────────────────────────────────────────
 show_client_state() {
-    echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${PARSED_UPGRADE_PATH}${RESET}"
+    echo -e "  ${BOLD}Iran VPS domain :${RESET}  ${YELLOW}wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}${RESET}"
     if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
         echo -e "  ${BOLD}Upgrade path    :${RESET}  ${GREEN}${PARSED_UPGRADE_PATH}${RESET}  ${CYAN}(obfuscation active)${RESET}"
     else
@@ -540,9 +540,9 @@ build_client_exec() {
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
         result+=" -R ${flag}"
     done
-    # Append upgrade path to WSS URL if configured
+    # wstunnel v10 client ignores URL path — must use --http-upgrade-path-prefix flag
+    [ -n "${PARSED_UPGRADE_PATH:-}" ] && result+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
     local wss_url="wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}"
-    [ -n "${PARSED_UPGRADE_PATH:-}" ] && wss_url+="${PARSED_UPGRADE_PATH}"
     result+=" ${wss_url}"
     echo "$result"
 }
