@@ -1347,11 +1347,21 @@ flow_server() {
     local _gen_path; _gen_path=$(gen_upgrade_path)
     echo -e "  ${CYAN}Auto-generated path example: ${_gen_path}${RESET}"
     echo ""
-    ask PARSED_UPGRADE_PATH "WebSocket upgrade path (Enter to use generated, leave blank to disable)" "${_gen_path}"
-    # Normalize: ensure leading slash or empty
-    if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
-        PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
-    fi
+    while true; do
+        ask PARSED_UPGRADE_PATH "WebSocket upgrade path (Enter to use generated, leave blank to disable)" "${_gen_path}"
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
+            PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
+        fi
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" =~ [[:space:]] ]]; then
+            warn "Path cannot contain spaces — enter only the path (e.g. /live/stream/abc123)"
+            continue
+        fi
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" =~ [\<\>\(\)\"\'\;\&\|] ]]; then
+            warn "Path contains invalid characters — use only letters, numbers, hyphens, underscores, slashes"
+            continue
+        fi
+        break
+    done
 
     echo ""
     echo -e "${BOLD}─── Scheduled Auto-Restart ────────────────────────────${RESET}"
@@ -1444,6 +1454,19 @@ flow_server() {
     fi
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 
+    if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
+        echo ""
+        echo -e "${BOLD}━━━━━━━━━━━━━  IMPORTANT — Foreign VPS Client Setup  ━━━━━━━━━━━━━${RESET}"
+        echo -e "  ${RED}All Foreign VPS clients MUST use this EXACT upgrade path:${RESET}"
+        echo ""
+        echo -e "  ${GREEN}${PARSED_UPGRADE_PATH}${RESET}"
+        echo ""
+        echo -e "  ${YELLOW}When running the client install wizard on each Foreign VPS,${RESET}"
+        echo -e "  ${YELLOW}enter exactly the path above when asked for upgrade path.${RESET}"
+        echo -e "  ${YELLOW}A mismatch causes 404 errors and the tunnel will not connect.${RESET}"
+        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    fi
+
     echo ""
     echo ""
     echo -e "${BOLD}─── ws command ────────────────────────────────────────${RESET}"
@@ -1469,10 +1492,21 @@ flow_client() {
     echo -e "  ${YELLOW}Enter the WebSocket upgrade path configured on the Iran VPS server.${RESET}"
     echo -e "  ${YELLOW}Leave empty ONLY if the server was set up without a path.${RESET}"
     echo ""
-    ask PARSED_UPGRADE_PATH "WebSocket upgrade path (copy from Iran VPS setup, or leave blank)" ""
-    if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
-        PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
-    fi
+    while true; do
+        ask PARSED_UPGRADE_PATH "WebSocket upgrade path (copy from Iran VPS setup, or leave blank)" ""
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" != /* ]]; then
+            PARSED_UPGRADE_PATH="/${PARSED_UPGRADE_PATH}"
+        fi
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" =~ [[:space:]] ]]; then
+            warn "Path cannot contain spaces — enter only the path (e.g. /live/stream/abc123)"
+            continue
+        fi
+        if [ -n "$PARSED_UPGRADE_PATH" ] && [[ "$PARSED_UPGRADE_PATH" =~ [\<\>\(\)\"\'\;\&\|] ]]; then
+            warn "Path contains invalid characters — use only letters, numbers, hyphens, underscores, slashes"
+            continue
+        fi
+        break
+    done
 
     echo ""
     echo -e "${BOLD}─── Caddy CA Certificate (TLS Trust) ──────────────────${RESET}"
