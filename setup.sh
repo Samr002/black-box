@@ -83,7 +83,7 @@ ask_domain() {
     while true; do
         if [ -n "$default" ]; then
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
-            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default" || true
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
         else
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
             if [ -z "${!varname}" ]; then
@@ -116,7 +116,7 @@ ask_port() {
     while true; do
         if [ -n "$default" ]; then
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
-            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default" || true
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
         else
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
             if [ -z "${!varname}" ]; then
@@ -213,7 +213,7 @@ gen_upgrade_path() {
     seg2="${segs2[$((RANDOM % ${#segs2[@]}))]}"
     # استفاده از /dev/urandom برای آنتروپی واقعی (نه RANDOM که فقط 15 بیت است)
     hex=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
-    [ -z "$hex" ] && hex=$(printf '%08x' $((RANDOM * RANDOM))) || true
+    [ -z "$hex" ] && hex=$(printf '%08x' $((RANDOM * RANDOM)))
     echo "/${seg1}/${seg2}/${hex}"
 }
 
@@ -634,7 +634,7 @@ show_server_state() {
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
-    result+=" --connection-min-idle 20"
+    result+=" --connection-min-idle 5"
     result+=" --dns-resolver dns://1.1.1.1"
     result+=" --http-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
     result+=" --http-headers \"Origin: https://${PARSED_DOMAIN}\""
@@ -669,7 +669,7 @@ Group=wstunnel
 ExecStart=${exec_full}
 Restart=always
 RestartSec=5
-LimitNOFILE=1048576
+LimitNOFILE=65536
 TasksMax=65536
 StandardOutput=journal
 StandardError=journal
@@ -712,7 +712,7 @@ Group=wstunnel
 ExecStart=/usr/local/bin/wstunnel server ${exec_flags} ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}
 Restart=always
 RestartSec=5
-LimitNOFILE=1048576
+LimitNOFILE=65536
 TasksMax=65536
 StandardOutput=journal
 StandardError=journal
@@ -1404,8 +1404,6 @@ tune_kernel_for_server() {
         "net.core.wmem_max=16777216"
         "net.ipv4.tcp_rmem=4096 87380 16777216"
         "net.ipv4.tcp_wmem=4096 65536 16777216"
-        "net.netfilter.nf_conntrack_max=262144"
-        "net.netfilter.nf_conntrack_tcp_timeout_time_wait=30"
     )
     for param in "${params[@]}"; do
         local key="${param%%=*}"
@@ -1416,9 +1414,21 @@ tune_kernel_for_server() {
             echo "${key} = ${val}" >> "$sysctl_conf"
         fi
     done
-    sysctl -p &>/dev/null || true
+    sysctl -p &>/dev/null
 
-    success "Kernel TCP tuning applied (syn_backlog=16384, somaxconn=16384, rmem/wmem=16MB, conntrack=262144)."
+    # system-wide file descriptor limit
+    local limits_conf="/etc/security/limits.conf"
+    if ! grep -q "wstunnel.*nofile" "$limits_conf" 2>/dev/null; then
+        cat >> "$limits_conf" <<'LIMEOF'
+# wstunnel high-connection tuning
+wstunnel soft nofile 1048576
+wstunnel hard nofile 1048576
+* soft nofile 65536
+* hard nofile 65536
+LIMEOF
+    fi
+
+    success "Kernel TCP tuning applied (syn_backlog=16384, somaxconn=16384, rmem/wmem=16MB)."
 }
 
 # ─────────────────────────────────────────────
@@ -2753,12 +2763,15 @@ PYEOF
                     net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse \
                     net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl \
                     net.ipv4.tcp_keepalive_probes net.core.rmem_max \
-                    net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
-                    net.netfilter.nf_conntrack_max \
-                    net.netfilter.nf_conntrack_tcp_timeout_time_wait; do
+                    net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem; do
             sed -i "/^${_key}/d" "$_sysctl_conf" 2>/dev/null || true
         done
         sysctl -p &>/dev/null || true
+        # پاکسازی limits.conf از ورودی‌های wstunnel
+        local _limits_conf="/etc/security/limits.conf"
+        if grep -q "wstunnel high-connection" "$_limits_conf" 2>/dev/null; then
+            sed -i '/# wstunnel high-connection tuning/,+4d' "$_limits_conf" 2>/dev/null || true
+        fi
         success "Kernel TCP tuning parameters removed."
     fi
 
