@@ -19,8 +19,10 @@ _cleanup() {
     for f in "${_CLEANUP_FILES[@]+${_CLEANUP_FILES[@]}}"; do
         rm -f "$f" 2>/dev/null
     done
-    # آزادسازی lock file
-    rm -f "$LOCK_FILE" 2>/dev/null || true
+    # آزادسازی lock file تنها در صورتی که قفل با موفقیت دریافت شده باشد
+    if [ "${_LOCK_ACQUIRED:-false}" = "true" ]; then
+        rm -f "$LOCK_FILE" 2>/dev/null || true
+    fi
 }
 trap _cleanup EXIT
 
@@ -495,7 +497,7 @@ parse_client_service() {
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
-    done < <(echo "$exec_line" | grep -oE 'tcp://[^[:space:]]+')
+    done < <(echo "$exec_line" | grep -oE '(tcp|udp|socks5)://[^[:space:]]+')
 }
 
 parse_server_service() {
@@ -569,13 +571,15 @@ show_client_state() {
         echo -e "    ${YELLOW}(no port mappings configured)${RESET}"
     else
         for i in "${!PARSED_FLAGS[@]}"; do
-            local addr="${PARSED_FLAGS[$i]#tcp://}"
+            local flag="${PARSED_FLAGS[$i]}"
+            local proto="${flag%%://*}"
+            local addr="${flag#*://}"
             local bh bp dh dp
             bh=$(echo "$addr" | cut -d: -f1)
             bp=$(echo "$addr" | cut -d: -f2)
             dh=$(echo "$addr" | cut -d: -f3)
             dp=$(echo "$addr" | cut -d: -f4)
-            echo -e "    ${CYAN}#$((i+1))${RESET}  Iran VPS ${bh}:${bp}  →  this VPS ${dh}:${dp}"
+            echo -e "    ${CYAN}#$((i+1))${RESET}  [${proto^^}] Iran VPS ${bh}:${bp}  →  this VPS ${dh}:${dp}"
         done
     fi
 }
@@ -601,7 +605,7 @@ show_server_state() {
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
-    result+=" --connection-min-idle 0"
+    result+=" --connection-min-idle 5"
     result+=" --dns-resolver dns://1.1.1.1"
     result+=" --http-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
     result+=" --http-headers \"Origin: https://${PARSED_DOMAIN}\""
@@ -1133,7 +1137,8 @@ diagnose_client() {
 
     local any_missing=false
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
-        local addr="${flag#tcp://}"
+        local proto="${flag%%://*}"
+        local addr="${flag#*://}"
         local bh bp dh dp
         bh=$(echo "$addr" | cut -d: -f1)
         bp=$(echo "$addr" | cut -d: -f2)
@@ -1158,10 +1163,16 @@ diagnose_client() {
     echo -e "  ${BOLD}Tunnel self-test (5 s timeout):${RESET}"
     local tunnel_ok=false
     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
-        local addr="${flag#tcp://}"
+        local proto="${flag%%://*}"
+        local addr="${flag#*://}"
         local bp dp
         bp=$(echo "$addr" | cut -d: -f2)
         dp=$(echo "$addr" | cut -d: -f4)
+
+        if [ "$proto" = "udp" ]; then
+            check_warn "Tunnel port ${bp} is UDP — skipping self-test"
+            continue
+        fi
 
         # Try to connect through the tunnel: connect to Iran VPS:bp → should arrive at local:dp
         if timeout 5 bash -c "echo >/dev/tcp/${PARSED_DOMAIN}/${bp}" 2>/dev/null; then
@@ -1676,7 +1687,18 @@ flow_client() {
             validate_port "$LOCAL_PORT" && break
             warn "Invalid port number. Enter a number between 1 and 65535."
         done
-        PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+        while true; do
+            ask PROTOCOL "Protocol (tcp, udp, both)" "tcp"
+            PROTOCOL="${PROTOCOL,,}"
+            if [[ "$PROTOCOL" =~ ^(tcp|udp|both)$ ]]; then break; fi
+            warn "Invalid protocol. Enter tcp, udp, or both."
+        done
+        if [ "$PROTOCOL" = "both" ]; then
+            PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+            PARSED_FLAGS+=("udp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+        else
+            PARSED_FLAGS+=("${PROTOCOL}://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+        fi
         IRAN_PORTS+=("${IRAN_PORT}")
         echo ""
         confirm "Add another port mapping?" || break
@@ -2021,7 +2043,18 @@ edit_client() {
                 done
                 ask LOCAL_HOST   "Local host on this Foreign VPS" "localhost"
                 ask LOCAL_PORT   "Local port on this Foreign VPS" "${IRAN_PORT}"
-                PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+                while true; do
+                    ask PROTOCOL "Protocol (tcp, udp, both)" "tcp"
+                    PROTOCOL="${PROTOCOL,,}"
+                    if [[ "$PROTOCOL" =~ ^(tcp|udp|both)$ ]]; then break; fi
+                    warn "Invalid protocol. Enter tcp, udp, or both."
+                done
+                if [ "$PROTOCOL" = "both" ]; then
+                    PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+                    PARSED_FLAGS+=("udp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+                else
+                    PARSED_FLAGS+=("${PROTOCOL}://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+                fi
                 changed=true
                 success "Port mapping added."
                 ;;
@@ -2030,15 +2063,17 @@ edit_client() {
                 echo ""
                 echo -e "  Which mapping to edit?"
                 for i in "${!PARSED_FLAGS[@]}"; do
-                    local a="${PARSED_FLAGS[$i]#tcp://}"
-                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
+                    local proto="${PARSED_FLAGS[$i]%%://*}"
+                    local a="${PARSED_FLAGS[$i]#*://}"
+                    echo -e "    ${CYAN}$((i+1))${RESET}  [${proto^^}] $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
                 done
                 echo ""
                 local e_idx
                 read -rp "$(echo -e "  ${BOLD}Enter number${RESET}: ")" e_idx
                 if [[ "$e_idx" =~ ^[0-9]+$ ]] && (( e_idx >= 1 && e_idx <= ${#PARSED_FLAGS[@]} )); then
                     local idx=$((e_idx - 1))
-                    local oa="${PARSED_FLAGS[$idx]#tcp://}"
+                    local old_proto="${PARSED_FLAGS[$idx]%%://*}"
+                    local oa="${PARSED_FLAGS[$idx]#*://}"
                     echo ""
                     ask IRAN_BIND_IP "Bind IP on Iran VPS"           "$(echo "$oa"|cut -d: -f1)"
                     while true; do
@@ -2046,7 +2081,7 @@ edit_client() {
                         local _dup=false
                         for _fi in "${!PARSED_FLAGS[@]}"; do
                             [ "$_fi" -eq "$idx" ] && continue
-                            local _ep; _ep=$(echo "${PARSED_FLAGS[$_fi]#tcp://}" | cut -d: -f2)
+                            local _ep; _ep=$(echo "${PARSED_FLAGS[$_fi]#*://}" | cut -d: -f2)
                             [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break
                         done
                         if $_dup; then
@@ -2057,7 +2092,18 @@ edit_client() {
                     done
                     ask LOCAL_HOST   "Local host on this Foreign VPS" "$(echo "$oa"|cut -d: -f3)"
                     ask LOCAL_PORT   "Local port on this Foreign VPS" "$(echo "$oa"|cut -d: -f4)"
-                    PARSED_FLAGS[$idx]="tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
+                    while true; do
+                        ask PROTOCOL "Protocol (tcp, udp, both)" "${old_proto}"
+                        PROTOCOL="${PROTOCOL,,}"
+                        if [[ "$PROTOCOL" =~ ^(tcp|udp|both)$ ]]; then break; fi
+                        warn "Invalid protocol. Enter tcp, udp, or both."
+                    done
+                    if [ "$PROTOCOL" = "both" ]; then
+                        PARSED_FLAGS[$idx]="tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
+                        PARSED_FLAGS+=("udp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
+                    else
+                        PARSED_FLAGS[$idx]="${PROTOCOL}://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
+                    fi
                     changed=true; success "Mapping #${e_idx} updated."
                 else
                     warn "Invalid selection."
@@ -2068,8 +2114,9 @@ edit_client() {
                 echo ""
                 echo -e "  Which mapping to remove?"
                 for i in "${!PARSED_FLAGS[@]}"; do
-                    local a="${PARSED_FLAGS[$i]#tcp://}"
-                    echo -e "    ${CYAN}$((i+1))${RESET}  $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
+                    local proto="${PARSED_FLAGS[$i]%%://*}"
+                    local a="${PARSED_FLAGS[$i]#*://}"
+                    echo -e "    ${CYAN}$((i+1))${RESET}  [${proto^^}] $(echo "$a"|cut -d: -f1):$(echo "$a"|cut -d: -f2)  →  $(echo "$a"|cut -d: -f3):$(echo "$a"|cut -d: -f4)"
                 done
                 echo ""
                 local r_idx
@@ -2148,9 +2195,14 @@ edit_client() {
                     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Reminders  ━━━━━━━━━━━━━━━━━━━━${RESET}"
                     echo -e "  ${YELLOW}Ensure these ports are open in Iran VPS firewall:${RESET}"
                     for flag in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
-                        local addr="${flag#tcp://}"
+                        local proto="${flag%%://*}"
+                        local addr="${flag#*://}"
                         local bp; bp=$(echo "$addr" | cut -d: -f2)
-                        echo -e "    ${CYAN}sudo ufw allow ${bp}/tcp${RESET}   (on Iran VPS)"
+                        if [ "$proto" = "udp" ]; then
+                            echo -e "    ${CYAN}sudo ufw allow ${bp}/udp${RESET}   (on Iran VPS)"
+                        else
+                            echo -e "    ${CYAN}sudo ufw allow ${bp}/tcp${RESET}   (on Iran VPS)"
+                        fi
                     done
                     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
                 fi
@@ -2735,6 +2787,7 @@ main() {
     if ! flock -n 9; then
         error "Another instance of this script is already running."
     fi
+    _LOCK_ACQUIRED=true
     _show_header
 
     while true; do
