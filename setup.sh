@@ -1378,7 +1378,8 @@ net.core.somaxconn = 4096
 net.ipv4.tcp_syn_retries = 3
 net.ipv4.tcp_fin_timeout = 15
 net.ipv4.tcp_tw_reuse = 1
-SYSTCL_EOF
+net.ipv4.ip_local_port_range = 1024 65535
+SYSCTL_EOF
     sysctl --system &>/dev/null
     success "Kernel TCP tuning applied via /etc/sysctl.d/99-wstunnel.conf"
 }
