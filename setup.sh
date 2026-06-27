@@ -1405,7 +1405,6 @@ tune_kernel_for_server() {
         "net.ipv4.tcp_rmem=4096 87380 16777216"
         "net.ipv4.tcp_wmem=4096 65536 16777216"
         "net.netfilter.nf_conntrack_max=262144"
-        "net.netfilter.nf_conntrack_tcp_timeout_established=600"
         "net.netfilter.nf_conntrack_tcp_timeout_time_wait=30"
     )
     for param in "${params[@]}"; do
@@ -2756,7 +2755,6 @@ PYEOF
                     net.ipv4.tcp_keepalive_probes net.core.rmem_max \
                     net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
                     net.netfilter.nf_conntrack_max \
-                    net.netfilter.nf_conntrack_tcp_timeout_established \
                     net.netfilter.nf_conntrack_tcp_timeout_time_wait; do
             sed -i "/^${_key}/d" "$_sysctl_conf" 2>/dev/null || true
         done
