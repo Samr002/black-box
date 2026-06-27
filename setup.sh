@@ -7,6 +7,8 @@ set -euo pipefail
 
 SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh"
 WS_BIN="/usr/local/bin/ws-v2"
+CADDY_VERSION="2.9.1"
+WSTUNNEL_VERSION_DEFAULT="10.5.5"
 
 # ─────────────────────────────────────────────
 # Colors
@@ -75,6 +77,61 @@ confirm() {
     [[ "$answer" =~ ^[Yy]$ ]]
 }
 
+# اعتبارسنجی domain name — فقط hostname یا IP معتبر می‌پذیرد
+ask_domain() {
+    local varname="$1" prompt="$2" default="${3:-}"
+    while true; do
+        if [ -n "$default" ]; then
+            read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
+        else
+            read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
+            if [ -z "${!varname}" ]; then
+                warn "  This field is required."
+                continue
+            fi
+        fi
+        local val="${!varname}"
+        if [[ "$val" =~ [[:space:]] ]]; then
+            warn "Domain cannot contain spaces."
+            continue
+        fi
+        if [[ "$val" =~ [\<\>\(\)\"\'\;\&\|\`\\] ]]; then
+            warn "Domain contains invalid characters."
+            continue
+        fi
+        if [[ "$val" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            break  # IP address — valid
+        fi
+        if [[ "$val" =~ ^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+            break  # valid domain
+        fi
+        warn "Invalid domain: '${val}' — use a hostname like tunnel.example.com or an IP address."
+    done
+}
+
+# اعتبارسنجی port number (1-65535)
+ask_port() {
+    local varname="$1" prompt="$2" default="${3:-}"
+    while true; do
+        if [ -n "$default" ]; then
+            read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
+        else
+            read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
+            if [ -z "${!varname}" ]; then
+                warn "  This field is required."
+                continue
+            fi
+        fi
+        local val="${!varname}"
+        if [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1 && val <= 65535 )); then
+            break
+        fi
+        warn "Invalid port: '${val}' — enter a number between 1 and 65535."
+    done
+}
+
 pick_action() {
     local varname="$1" choice
     echo -e "  ${CYAN}1${RESET}) ${BOLD}Install${RESET}   — Iran VPS     (wstunnel server + Caddy entry point)"
@@ -126,9 +183,15 @@ detect_services() {
     done
     # اگر هیچکدام پیدا نشد، هر فایل سرویس حاوی wstunnel را پیدا کن
     if [ ${#_out[@]} -eq 0 ]; then
+        local _extras=()
         while IFS= read -r f; do
-            [ -f "$f" ] && _out+=("$(basename "$f")")
+            [ -f "$f" ] && _extras+=("$(basename "$f")")
         done < <(grep -rl "wstunnel" /etc/systemd/system/ 2>/dev/null | grep '\.service$' || true)
+        if [ ${#_extras[@]} -gt 2 ]; then
+            warn "Found ${#_extras[@]} wstunnel-related service files — expected at most 2 (server + client)."
+            warn "Extra files may be leftover from a failed install. Review: ls /etc/systemd/system/ | grep wstunnel"
+        fi
+        for e in "${_extras[@]+"${_extras[@]}"}"; do _out+=("$e"); done
     fi
 }
 
@@ -148,7 +211,9 @@ gen_upgrade_path() {
     local segs2=("stream" "connect" "socket" "data" "relay" "pipe" "link" "sync")
     seg1="${segs1[$((RANDOM % ${#segs1[@]}))]}"
     seg2="${segs2[$((RANDOM % ${#segs2[@]}))]}"
-    hex=$(printf '%06x' $((RANDOM * RANDOM % 16777216)))
+    # استفاده از /dev/urandom برای آنتروپی واقعی (نه RANDOM که فقط 15 بیت است)
+    hex=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
+    [ -z "$hex" ] && hex=$(printf '%08x' $((RANDOM * RANDOM)))
     echo "/${seg1}/${seg2}/${hex}"
 }
 
@@ -196,7 +261,7 @@ install_caddy() {
             aarch64) arch="arm64" ;;
             *) error "Unsupported architecture: $arch" ;;
         esac
-        local ver="2.9.1"
+        local ver="${CADDY_VERSION}"
         local url="https://github.com/caddyserver/caddy/releases/download/v${ver}/caddy_${ver}_linux_${arch}.tar.gz"
         info "Downloading Caddy v${ver}..."
         cd /tmp
@@ -291,6 +356,11 @@ configure_caddyfile() {
 }"
     fi
 
+    # backup قبل از هر تغییر
+    if [ -f "$caddyfile" ] && [ -s "$caddyfile" ]; then
+        cp "$caddyfile" "${caddyfile}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    fi
+
     if [ ! -f "$caddyfile" ] || [ ! -s "$caddyfile" ]; then
         # فایل وجود ندارد یا خالی است — از صفر بنویس
         printf '%s\n\n%s\n' "$global_block" "$block" > "$caddyfile"
@@ -363,6 +433,7 @@ remove_caddyfile_domain() {
         info "Domain ${domain} not found in Caddyfile — nothing to remove."
         return
     fi
+    cp "$caddyfile" "${caddyfile}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
     python3 - "$caddyfile" "$domain" <<'PYEOF'
 import sys, re
 path, domain = sys.argv[1], sys.argv[2]
@@ -395,6 +466,15 @@ PYEOF
 
 install_wstunnel_binary() {
     local version="$1" arch
+    # skip اگر همان نسخه از قبل نصب است
+    local wbin; wbin=$(wstunnel_bin)
+    if [ -n "$wbin" ]; then
+        local cur_ver; cur_ver=$("$wbin" --version 2>&1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+        if [ "$cur_ver" = "$version" ]; then
+            info "wstunnel v${version} already installed — skipping download."
+            return
+        fi
+    fi
     arch=$(uname -m)
     case "$arch" in
         x86_64)  arch="amd64" ;;
@@ -403,14 +483,14 @@ install_wstunnel_binary() {
     esac
     local tarball="wstunnel_${version}_linux_${arch}.tar.gz"
     local url="https://github.com/erebe/wstunnel/releases/download/v${version}/${tarball}"
+    local tmpdir; tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
     info "Downloading wstunnel v${version} (${arch})..."
-    cd /tmp
-    wget -q --show-progress "$url" -O "$tarball" || error "Download failed: $url"
-    tar xzf "$tarball"
-    mv -f wstunnel /usr/local/bin/wstunnel
+    wget -q --show-progress "$url" -O "${tmpdir}/${tarball}" || error "Download failed: $url"
+    tar xzf "${tmpdir}/${tarball}" -C "$tmpdir" wstunnel
+    mv -f "${tmpdir}/wstunnel" /usr/local/bin/wstunnel
     chmod +x /usr/local/bin/wstunnel
-    rm -f "$tarball"
-    success "wstunnel installed: $(wstunnel --version 2>&1 | head -n1)"
+    success "wstunnel installed: $(/usr/local/bin/wstunnel --version 2>&1 | head -n1)"
 }
 
 setup_user() {
@@ -589,11 +669,18 @@ Group=wstunnel
 WorkingDirectory=/home/wstunnel
 ExecStart=${exec_full}
 Restart=always
-RestartSec=20
+RestartSec=5
 LimitNOFILE=65536
 TasksMax=65536
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -631,6 +718,13 @@ LimitNOFILE=65536
 TasksMax=65536
 StandardOutput=journal
 StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -691,7 +785,6 @@ write_restart_timer() {
     cat > "/etc/systemd/system/${timer_name}.service" <<EOF
 [Unit]
 Description=WStunnel ${label} Scheduled Restart
-After=${svc_name}.service
 
 [Service]
 Type=oneshot
@@ -1300,15 +1393,23 @@ tune_kernel_for_server() {
     info "Applying kernel TCP tuning for high-connection workloads..."
     local sysctl_conf="/etc/sysctl.conf"
     local params=(
-        "net.ipv4.tcp_max_syn_backlog=4096"
-        "net.core.netdev_max_backlog=4096"
+        "net.ipv4.tcp_max_syn_backlog=16384"
+        "net.core.somaxconn=16384"
+        "net.core.netdev_max_backlog=8192"
         "net.ipv4.tcp_syn_retries=3"
         "net.ipv4.tcp_fin_timeout=15"
         "net.ipv4.tcp_tw_reuse=1"
+        "net.ipv4.tcp_keepalive_time=300"
+        "net.ipv4.tcp_keepalive_intvl=30"
+        "net.ipv4.tcp_keepalive_probes=5"
+        "net.core.rmem_max=16777216"
+        "net.core.wmem_max=16777216"
+        "net.ipv4.tcp_rmem=4096 87380 16777216"
+        "net.ipv4.tcp_wmem=4096 65536 16777216"
     )
     for param in "${params[@]}"; do
         local key="${param%%=*}"
-        local val="${param##*=}"
+        local val="${param#*=}"
         if grep -q "^${key}" "$sysctl_conf" 2>/dev/null; then
             sed -i "s|^${key}.*|${key} = ${val}|" "$sysctl_conf"
         else
@@ -1316,7 +1417,20 @@ tune_kernel_for_server() {
         fi
     done
     sysctl -p &>/dev/null
-    success "Kernel TCP tuning applied (tcp_max_syn_backlog=4096, tcp_tw_reuse=1)."
+
+    # system-wide file descriptor limit
+    local limits_conf="/etc/security/limits.conf"
+    if ! grep -q "wstunnel.*nofile" "$limits_conf" 2>/dev/null; then
+        cat >> "$limits_conf" <<'LIMEOF'
+# wstunnel high-connection tuning
+wstunnel soft nofile 1048576
+wstunnel hard nofile 1048576
+* soft nofile 65536
+* hard nofile 65536
+LIMEOF
+    fi
+
+    success "Kernel TCP tuning applied (syn_backlog=16384, somaxconn=16384, rmem/wmem=16MB)."
 }
 
 # ─────────────────────────────────────────────
@@ -1325,9 +1439,9 @@ tune_kernel_for_server() {
 flow_server() {
     echo ""
     echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
-    ask WSTUNNEL_VERSION "wstunnel version to install" "10.5.5"
+    ask WSTUNNEL_VERSION "wstunnel version to install" "${WSTUNNEL_VERSION_DEFAULT}"
     ask PARSED_BIND_IP   "Bind IP (keep 127.0.0.1 so only Caddy can reach it)" "127.0.0.1"
-    ask PARSED_BIND_PORT "Port wstunnel server listens on" "2018"
+    ask_port PARSED_BIND_PORT "Port wstunnel server listens on" "2018"
 
     echo ""
     echo -e "${BOLD}─── Caddy / Domains ───────────────────────────────────${RESET}"
@@ -1339,7 +1453,7 @@ flow_server() {
     local count=0
     while true; do
         count=$((count + 1))
-        ask NEW_DOMAIN "Domain #${count} (e.g. tunnel.example.com)" ""
+        ask_domain NEW_DOMAIN "Domain #${count} (e.g. tunnel.example.com)"
         PARSED_DOMAINS+=("${NEW_DOMAIN}")
         echo ""
         confirm "Add another domain?" || break
@@ -1411,13 +1525,24 @@ flow_server() {
 
     info "Enabling and starting Caddy..."
     systemctl enable caddy
-    systemctl restart caddy || true
-    sleep 1
+    systemctl restart caddy 2>/dev/null || true
+    sleep 2
     if systemctl is-active caddy &>/dev/null; then
         success "Caddy is running."
     else
-        warn "Caddy failed to start — check logs:"
-        journalctl -u caddy -n 20 --no-pager | sed 's/^/    /'
+        warn "Caddy failed to start — checking cause..."
+        if journalctl -u caddy -n 30 --no-pager 2>/dev/null | grep -q "address already in use"; then
+            echo ""
+            echo -e "  ${RED}Port 443 is already in use by another process!${RESET}"
+            echo -e "  Run these to identify what is using port 443:"
+            echo -e "  ${CYAN}ss -tlnp | grep :443${RESET}"
+            echo -e "  ${CYAN}systemctl list-units --state=running | grep -E 'nginx|apache|caddy'${RESET}"
+            echo ""
+            echo -e "  ${YELLOW}If you installed Caddy via apt AND via binary, you may have two Caddy instances.${RESET}"
+            echo -e "  To fix: ${CYAN}apt-get remove --purge caddy && systemctl start caddy${RESET}"
+        else
+            journalctl -u caddy -n 20 --no-pager | sed 's/^/    /'
+        fi
     fi
 
     # ── ۳. تایمر ری‌استارت ──────────────────────────────
@@ -1488,12 +1613,12 @@ flow_server() {
 flow_client() {
     echo ""
     echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
-    ask WSTUNNEL_VERSION "wstunnel version to install" "10.5.5"
+    ask WSTUNNEL_VERSION "wstunnel version to install" "${WSTUNNEL_VERSION_DEFAULT}"
 
     echo ""
     echo -e "${BOLD}─── Iran VPS connection ───────────────────────────────${RESET}"
-    ask PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)" ""
-    ask PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
+    ask_domain PARSED_DOMAIN   "Tunnel domain on Iran VPS (e.g. tunnel.example.com)"
+    ask_port   PARSED_WSS_PORT "WSS port on Iran VPS (Caddy HTTPS port)" "443"
 
     echo ""
     echo -e "${BOLD}─── Anti-Detection / Obfuscation ──────────────────────${RESET}"
@@ -1529,9 +1654,18 @@ flow_client() {
         confirm "  Reinstall / update it?" || _ca_already=true
     fi
     if ! $_ca_already; then
-        echo -e "  ${BOLD}Paste the cert content below (from Iran VPS), then press Ctrl+D on a new line:${RESET}"
+        echo -e "  ${BOLD}Paste the cert content from Iran VPS below.${RESET}"
+        echo -e "  ${YELLOW}How to get it — run on Iran VPS:${RESET}"
+        echo -e "  ${CYAN}cat /var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt${RESET}"
+        echo ""
+        echo -e "  ${YELLOW}Steps:${RESET}"
+        echo -e "  ${YELLOW}  1. Copy the ENTIRE output including -----BEGIN CERTIFICATE----- and -----END CERTIFICATE-----${RESET}"
+        echo -e "  ${YELLOW}  2. Paste it below${RESET}"
+        echo -e "  ${YELLOW}  3. Press Enter on a blank line, then press Ctrl+D${RESET}"
+        echo ""
         local _ca_content _ca_tmp
         _ca_tmp=$(mktemp)
+        trap 'rm -f "$_ca_tmp"' RETURN
         _ca_content=$(cat 2>/dev/null || true)
         if echo "$_ca_content" | grep -q "BEGIN CERTIFICATE"; then
             echo "$_ca_content" > "$_ca_tmp"
@@ -1545,16 +1679,26 @@ flow_client() {
                     warn "update-ca-certificates failed — trying --fresh..."
                     update-ca-certificates --fresh 2>/dev/null || true
                 fi
+                # تأیید نصب
+                if openssl verify -CAfile /usr/local/share/ca-certificates/caddy-iran-ca.crt \
+                    /usr/local/share/ca-certificates/caddy-iran-ca.crt &>/dev/null 2>&1; then
+                    check_ok "CA cert verified in system trust store."
+                else
+                    warn "CA cert may not be trusted yet — run: update-ca-certificates --fresh"
+                fi
             else
                 warn "Cert failed OpenSSL validation — NOT installed (system CA bundle unchanged)."
                 echo -e "  ${YELLOW}Make sure you copied the full cert including BEGIN/END lines.${RESET}"
             fi
         else
             warn "No valid cert pasted — skipping. Install manually later:"
-            echo -e "  ${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt${RESET}"
+            echo -e "  ${CYAN}cat > /usr/local/share/ca-certificates/caddy-iran-ca.crt << 'EOF'${RESET}"
+            echo -e "  ${CYAN}(paste cert here)${RESET}"
+            echo -e "  ${CYAN}EOF${RESET}"
             echo -e "  ${CYAN}update-ca-certificates${RESET}"
         fi
         rm -f "$_ca_tmp"
+        trap - RETURN
     fi
 
     echo ""
@@ -1578,7 +1722,7 @@ flow_client() {
         echo -e "  ${BOLD}── Mapping #${count} ──${RESET}"
         ask IRAN_BIND_IP "Bind IP on Iran VPS (0.0.0.0 = public)" "0.0.0.0"
         while true; do
-            ask IRAN_PORT "Port to open on Iran VPS (users connect here)" "8443"
+            ask_port IRAN_PORT "Port to open on Iran VPS (users connect here)" "8443"
             local _dup_port=false
             for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
                 [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
@@ -1590,7 +1734,7 @@ flow_client() {
             fi
         done
         ask LOCAL_HOST   "Local host on this Foreign VPS (VPN service listens here)" "localhost"
-        ask LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
+        ask_port LOCAL_PORT   "Local port on this Foreign VPS (VPN service listens here)" "${IRAN_PORT}"
         PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
         IRAN_PORTS+=("${IRAN_PORT}")
         echo ""
@@ -1703,7 +1847,7 @@ edit_server() {
         case "$choice" in
             1)
                 echo ""
-                ask NEW_DOMAIN "New domain (e.g. tunnel2.example.com)" ""
+                ask_domain NEW_DOMAIN "New domain (e.g. tunnel2.example.com)"
                 local dup=false
                 for d in "${PARSED_DOMAINS[@]+"${PARSED_DOMAINS[@]}"}"; do
                     [ "$d" = "${NEW_DOMAIN}" ] && dup=true && break
@@ -1758,8 +1902,8 @@ edit_server() {
                 ;;
             3)
                 echo ""
-                ask NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
-                ask NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
+                ask      NEW_BIND_IP   "Bind IP"   "${PARSED_BIND_IP}"
+                ask_port NEW_BIND_PORT "Bind port" "${PARSED_BIND_PORT}"
                 if [ "${NEW_BIND_IP}" != "${PARSED_BIND_IP}" ] || [ "${NEW_BIND_PORT}" != "${PARSED_BIND_PORT}" ]; then
                     PARSED_BIND_IP="${NEW_BIND_IP}"
                     PARSED_BIND_PORT="${NEW_BIND_PORT}"
@@ -1922,7 +2066,7 @@ edit_client() {
                 echo -e "  ${BOLD}── New Port Mapping ──${RESET}"
                 ask IRAN_BIND_IP "Bind IP on Iran VPS" "0.0.0.0"
                 while true; do
-                    ask IRAN_PORT "Port to open on Iran VPS" "8443"
+                    ask_port IRAN_PORT "Port to open on Iran VPS" "8443"
                     local _dup=false
                     for _f in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
                         local _ep; _ep=$(echo "${_f#tcp://}" | cut -d: -f2)
@@ -1934,8 +2078,8 @@ edit_client() {
                         break
                     fi
                 done
-                ask LOCAL_HOST   "Local host on this Foreign VPS" "localhost"
-                ask LOCAL_PORT   "Local port on this Foreign VPS" "${IRAN_PORT}"
+                ask      LOCAL_HOST "Local host on this Foreign VPS" "localhost"
+                ask_port LOCAL_PORT "Local port on this Foreign VPS" "${IRAN_PORT}"
                 PARSED_FLAGS+=("tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}")
                 changed=true
                 success "Port mapping added."
@@ -1955,9 +2099,9 @@ edit_client() {
                     local idx=$((e_idx - 1))
                     local oa="${PARSED_FLAGS[$idx]#tcp://}"
                     echo ""
-                    ask IRAN_BIND_IP "Bind IP on Iran VPS"           "$(echo "$oa"|cut -d: -f1)"
+                    ask      IRAN_BIND_IP "Bind IP on Iran VPS"  "$(echo "$oa"|cut -d: -f1)"
                     while true; do
-                        ask IRAN_PORT "Port on Iran VPS"             "$(echo "$oa"|cut -d: -f2)"
+                        ask_port IRAN_PORT "Port on Iran VPS"    "$(echo "$oa"|cut -d: -f2)"
                         local _dup=false
                         for _fi in "${!PARSED_FLAGS[@]}"; do
                             [ "$_fi" -eq "$idx" ] && continue
@@ -1970,8 +2114,8 @@ edit_client() {
                             break
                         fi
                     done
-                    ask LOCAL_HOST   "Local host on this Foreign VPS" "$(echo "$oa"|cut -d: -f3)"
-                    ask LOCAL_PORT   "Local port on this Foreign VPS" "$(echo "$oa"|cut -d: -f4)"
+                    ask      LOCAL_HOST "Local host on this Foreign VPS" "$(echo "$oa"|cut -d: -f3)"
+                    ask_port LOCAL_PORT "Local port on this Foreign VPS" "$(echo "$oa"|cut -d: -f4)"
                     PARSED_FLAGS[$idx]="tcp://${IRAN_BIND_IP}:${IRAN_PORT}:${LOCAL_HOST}:${LOCAL_PORT}"
                     changed=true; success "Mapping #${e_idx} updated."
                 else
@@ -2004,8 +2148,8 @@ edit_client() {
                 ;;
             4)
                 echo ""
-                ask NEW_DOMAIN   "New Iran VPS domain"  "${PARSED_DOMAIN}"
-                ask NEW_WSS_PORT "New WSS port"         "${PARSED_WSS_PORT}"
+                ask_domain NEW_DOMAIN   "New Iran VPS domain"  "${PARSED_DOMAIN}"
+                ask_port   NEW_WSS_PORT "New WSS port"         "${PARSED_WSS_PORT}"
                 if [ "$NEW_DOMAIN" != "$PARSED_DOMAIN" ] || [ "$NEW_WSS_PORT" != "$PARSED_WSS_PORT" ]; then
                     PARSED_DOMAIN="$NEW_DOMAIN"
                     PARSED_WSS_PORT="$NEW_WSS_PORT"
@@ -2163,7 +2307,7 @@ update_caddy_binary() {
         armv7l)  arch="armv7" ;;
         *)       warn "Unsupported arch for Caddy update: ${arch}"; return ;;
     esac
-    local ver="2.9.1"
+    local ver="${CADDY_VERSION}"
     local url="https://github.com/caddyserver/caddy/releases/download/v${ver}/caddy_${ver}_linux_${arch}.tar.gz"
     info "Downloading Caddy v${ver}..."
     curl -fsSL "$url" -o /tmp/caddy.tar.gz
@@ -2255,7 +2399,7 @@ flow_update() {
     echo ""
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━  Will update  ━━━━━━━━━━━━━━━━━━${RESET}"
     $do_wstunnel && echo -e "  ${CYAN}wstunnel${RESET}   →  v${NEW_VERSION}"
-    $do_caddy    && echo -e "  ${CYAN}Caddy${RESET}      →  v2.9.1 (latest pinned)"
+    $do_caddy    && echo -e "  ${CYAN}Caddy${RESET}      →  v${CADDY_VERSION} (latest pinned)"
     $do_script   && echo -e "  ${CYAN}ws script${RESET}  →  latest from GitHub"
     echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
     echo ""
@@ -2403,7 +2547,8 @@ flow_uninstall() {
 
     # ── sysctl tuning detection (Iran VPS) ──────
     local sysctl_tuning_exists=false
-    grep -q "^net.ipv4.tcp_max_syn_backlog" /etc/sysctl.conf 2>/dev/null && sysctl_tuning_exists=true
+    { grep -q "^net.ipv4.tcp_max_syn_backlog" /etc/sysctl.conf 2>/dev/null \
+      || grep -q "^net.core.somaxconn" /etc/sysctl.conf 2>/dev/null; } && sysctl_tuning_exists=true
 
     # Detect if this is an Iran VPS (server) install
     local has_server=false
@@ -2615,11 +2760,20 @@ PYEOF
     if $sysctl_tuning_exists; then
         info "Removing kernel TCP tuning from /etc/sysctl.conf..."
         local _sysctl_conf="/etc/sysctl.conf"
-        for _key in net.ipv4.tcp_max_syn_backlog net.core.netdev_max_backlog \
-                    net.ipv4.tcp_syn_retries net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse; do
+        for _key in net.ipv4.tcp_max_syn_backlog net.core.somaxconn \
+                    net.core.netdev_max_backlog net.ipv4.tcp_syn_retries \
+                    net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse \
+                    net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl \
+                    net.ipv4.tcp_keepalive_probes net.core.rmem_max \
+                    net.core.wmem_max net.ipv4.tcp_rmem net.ipv4.tcp_wmem; do
             sed -i "/^${_key}/d" "$_sysctl_conf" 2>/dev/null || true
         done
         sysctl -p &>/dev/null || true
+        # پاکسازی limits.conf از ورودی‌های wstunnel
+        local _limits_conf="/etc/security/limits.conf"
+        if grep -q "wstunnel high-connection" "$_limits_conf" 2>/dev/null; then
+            sed -i '/# wstunnel high-connection tuning/,+4d' "$_limits_conf" 2>/dev/null || true
+        fi
         success "Kernel TCP tuning parameters removed."
     fi
 
