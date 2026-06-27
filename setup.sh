@@ -1416,7 +1416,7 @@ tune_kernel_for_server() {
             echo "${key} = ${val}" >> "$sysctl_conf"
         fi
     done
-    sysctl -p &>/dev/null
+    sysctl -p &>/dev/null || true
 
     success "Kernel TCP tuning applied (syn_backlog=16384, somaxconn=16384, rmem/wmem=16MB, conntrack=262144)."
 }
