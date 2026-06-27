@@ -64,7 +64,7 @@ ask() {
     else
         while true; do
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" value
-            [ -n "$value" ] && break
+            [ -n "$value" ] && break || true
             warn "  This field is required."
         done
     fi
@@ -179,7 +179,7 @@ detect_services() {
     _out=()
     # بررسی اسم‌های استاندارد
     for svc in wstunnel-server.service wstunnel-client.service; do
-        [ -f "/etc/systemd/system/${svc}" ] && _out+=("$svc")
+        [ -f "/etc/systemd/system/${svc}" ] && _out+=("$svc") || true
     done
     # اگر هیچکدام پیدا نشد، هر فایل سرویس حاوی wstunnel را پیدا کن
     if [ ${#_out[@]} -eq 0 ]; then
@@ -522,7 +522,7 @@ parse_client_service() {
     host_port=$(echo "$wss_url" | sed 's|wss://||' | cut -d'/' -f1)
     PARSED_DOMAIN=$(echo "$host_port" | cut -d':' -f1)
     PARSED_WSS_PORT=$(echo "$host_port" | cut -d':' -f2)
-    [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443"
+    [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443" || true
     # Path comes from --http-upgrade-path-prefix flag (not the URL path)
     PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p')
     PARSED_FLAGS=()
@@ -547,7 +547,7 @@ parse_server_service() {
     local _caddyfile="/etc/caddy/Caddyfile"
     PARSED_UPGRADE_PATH=""
     [ -f "$_caddyfile" ] && \
-        PARSED_UPGRADE_PATH=$(sed -n 's/[[:space:]]*handle \(\/[^* ]*\)\*.*/\1/p' "$_caddyfile" | head -1)
+        PARSED_UPGRADE_PATH=$(sed -n 's/[[:space:]]*handle \(\/[^* ]*\)\*.*/\1/p' "$_caddyfile" | head -1) || true
 }
 
 parse_server_domains() {
@@ -642,7 +642,7 @@ build_client_exec() {
         result+=" -R ${flag}"
     done
     # wstunnel v10 client ignores URL path — must use --http-upgrade-path-prefix flag
-    [ -n "${PARSED_UPGRADE_PATH:-}" ] && result+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}"
+    [ -n "${PARSED_UPGRADE_PATH:-}" ] && result+=" --http-upgrade-path-prefix ${PARSED_UPGRADE_PATH}" || true
     local wss_url="wss://${PARSED_DOMAIN}:${PARSED_WSS_PORT}"
     result+=" ${wss_url}"
     echo "$result"
@@ -1723,7 +1723,7 @@ flow_client() {
             ask_port IRAN_PORT "Port to open on Iran VPS (users connect here)" "8443"
             local _dup_port=false
             for _existing_port in "${IRAN_PORTS[@]+"${IRAN_PORTS[@]}"}"; do
-                [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break
+                [ "$_existing_port" = "$IRAN_PORT" ] && _dup_port=true && break || true
             done
             if $_dup_port; then
                 warn "Port ${IRAN_PORT} is already used in a previous mapping. Choose a different port."
@@ -2068,7 +2068,7 @@ edit_client() {
                     local _dup=false
                     for _f in "${PARSED_FLAGS[@]+"${PARSED_FLAGS[@]}"}"; do
                         local _ep; _ep=$(echo "${_f#tcp://}" | cut -d: -f2)
-                        [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break
+                        [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break || true
                     done
                     if $_dup; then
                         warn "Port ${IRAN_PORT} already exists in another mapping. Choose a different port."
@@ -2104,7 +2104,7 @@ edit_client() {
                         for _fi in "${!PARSED_FLAGS[@]}"; do
                             [ "$_fi" -eq "$idx" ] && continue
                             local _ep; _ep=$(echo "${PARSED_FLAGS[$_fi]#tcp://}" | cut -d: -f2)
-                            [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break
+                            [ "$_ep" = "$IRAN_PORT" ] && _dup=true && break || true
                         done
                         if $_dup; then
                             warn "Port ${IRAN_PORT} is used by another mapping. Choose a different port."
