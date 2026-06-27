@@ -83,7 +83,7 @@ ask_domain() {
     while true; do
         if [ -n "$default" ]; then
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
-            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default" || true
         else
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
             if [ -z "${!varname}" ]; then
@@ -116,7 +116,7 @@ ask_port() {
     while true; do
         if [ -n "$default" ]; then
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET} [${YELLOW}${default}${RESET}]: ")" "$varname"
-            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default"
+            [ -z "${!varname}" ] && printf -v "$varname" '%s' "$default" || true
         else
             read -rp "$(echo -e "  ${BOLD}${prompt}${RESET}: ")" "$varname"
             if [ -z "${!varname}" ]; then
@@ -213,7 +213,7 @@ gen_upgrade_path() {
     seg2="${segs2[$((RANDOM % ${#segs2[@]}))]}"
     # استفاده از /dev/urandom برای آنتروپی واقعی (نه RANDOM که فقط 15 بیت است)
     hex=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
-    [ -z "$hex" ] && hex=$(printf '%08x' $((RANDOM * RANDOM)))
+    [ -z "$hex" ] && hex=$(printf '%08x' $((RANDOM * RANDOM))) || true
     echo "/${seg1}/${seg2}/${hex}"
 }
 
