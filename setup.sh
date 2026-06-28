@@ -5,8 +5,8 @@
 
 set -euo pipefail
 
-SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh"
-WS_BIN="/usr/local/bin/ws-v2"
+SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh"
+WS_BIN="/usr/local/bin/ws"
 
 # ─────────────────────────────────────────────
 # Colors
@@ -105,16 +105,8 @@ pick_action() {
 # ─────────────────────────────────────────────
 # Shared helpers
 # ─────────────────────────────────────────────
-check_python3() {
-    if ! command -v python3 &>/dev/null; then
-        info "python3 not found. Installing python3..."
-        apt-get update -qq && apt-get install -y python3
-    fi
-}
-
 check_root() {
     [ "$EUID" -eq 0 ] || error "Run as root: sudo bash setup.sh"
-    check_python3
 }
 
 detect_services() {
@@ -175,7 +167,7 @@ install_caddy() {
 
     # روش اول: apt از مخزن رسمی Caddy
     info "Trying apt (official Caddy repo)..."
-    if apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg \
+    if apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
         && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
             | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
         && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
@@ -295,7 +287,7 @@ configure_caddyfile() {
         # فایل وجود ندارد یا خالی است — از صفر بنویس
         printf '%s\n\n%s\n' "$global_block" "$block" > "$caddyfile"
         success "Caddyfile created with domain ${domain}."
-    elif grep -qE "^\s*${domain//./\.}\s*\{" "$caddyfile" 2>/dev/null; then
+    elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
         # بلاک این دامنه از قبل وجود دارد — با block جدید جایگزین کن
         info "Updating ${domain} in Caddyfile..."
         local _block_tmp; _block_tmp=$(mktemp)
@@ -310,7 +302,7 @@ with open(cfile) as f:
 result = []
 i = 0
 replaced = False
-dom_pat = re.compile(r'^\s*' + re.escape(domain) + r'\s*\{')
+dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if not replaced and dom_pat.match(lines[i]):
         depth = lines[i].count('{') - lines[i].count('}')
@@ -359,7 +351,7 @@ remove_caddyfile_domain() {
     local caddyfile="/etc/caddy/Caddyfile"
     [ -f "$caddyfile" ] || return
     # اگه دامنه اصلاً در فایل نیست، کاری نکن
-    if ! grep -qE "^\s*${domain//./\.}\s*\{" "$caddyfile" 2>/dev/null; then
+    if ! grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
         info "Domain ${domain} not found in Caddyfile — nothing to remove."
         return
     fi
@@ -370,7 +362,7 @@ with open(path) as f:
     lines = f.read().split('\n')
 result = []
 i = 0
-dom_pat = re.compile(r'^\s*' + re.escape(domain) + r'\s*\{')
+dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if dom_pat.match(lines[i]):
         # Consume the entire block
@@ -487,7 +479,7 @@ except Exception:
     sys.exit(0)
 i = 0
 while i < len(lines):
-    m = re.match(r'^\s*([^\s#]+)\s*\{', lines[i])
+    m = re.match(r'^(\S+)\s*\{', lines[i])
     if m:
         domain = m.group(1)
         block = [lines[i]]
@@ -600,7 +592,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable wstunnel-client.service
-    systemctl restart wstunnel-client.service || warn "Client service failed to start. Check status below."
+    systemctl restart wstunnel-client.service
     echo ""
     systemctl status wstunnel-client.service --no-pager
     echo ""
@@ -637,7 +629,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable wstunnel-server.service
-    systemctl restart wstunnel-server.service || warn "Server service failed to start. Check status below."
+    systemctl restart wstunnel-server.service
     echo ""
     systemctl status wstunnel-server.service --no-pager
     echo ""
@@ -797,10 +789,8 @@ diagnose_server() {
         fi
         # بررسی محتوای Caddyfile
         if [ -f "$caddyfile" ]; then
-            if grep -qE "(localhost|127\.0\.0\.1):${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
-                check_ok "Caddyfile correctly proxies to :${PARSED_BIND_PORT}"
-            elif grep -q "respond 404" "$caddyfile" 2>/dev/null; then
-                check_fail "Caddyfile has 'respond 404' and does not proxy to :${PARSED_BIND_PORT} — this blocks all wstunnel connections!"
+            if grep -q "respond 404" "$caddyfile" 2>/dev/null; then
+                check_fail "Caddyfile has 'respond 404' — this blocks all wstunnel connections!"
                 echo -e "         ${RED}Fix on Iran VPS:${RESET}"
                 echo -e "         ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
                 echo -e "         ${CYAN}<your-domain> {${RESET}"
@@ -809,6 +799,8 @@ diagnose_server() {
                 echo -e "         ${CYAN}}${RESET}"
                 echo -e "         ${CYAN}EOF${RESET}"
                 echo -e "         ${CYAN}systemctl reload caddy${RESET}"
+            elif grep -qE "(localhost|127\.0\.0\.1):${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
+                check_ok "Caddyfile correctly proxies to :${PARSED_BIND_PORT}"
             else
                 check_warn "Caddyfile may not proxy to :${PARSED_BIND_PORT}"
                 echo -e "         ${YELLOW}→ cat /etc/caddy/Caddyfile${RESET}"
@@ -859,7 +851,7 @@ diagnose_server() {
     echo ""
     echo -e "  ${BOLD}ws Command:${RESET}"
     if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
-        check_ok "'ws-v2' shortcut installed at ${WS_BIN}  (type 'ws-v2' to relaunch)"
+        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
     else
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
@@ -1137,7 +1129,7 @@ diagnose_client() {
     echo ""
     echo -e "  ${BOLD}ws Command:${RESET}"
     if [ -f "$WS_BIN" ] && [ -x "$WS_BIN" ]; then
-        check_ok "'ws-v2' shortcut installed at ${WS_BIN}  (type 'ws-v2' to relaunch)"
+        check_ok "'ws' shortcut installed at ${WS_BIN}  (type 'ws' to relaunch)"
     else
         check_warn "'ws' shortcut not found — run Update (option 5) to install it"
     fi
@@ -1261,8 +1253,8 @@ flow_diagnose() {
 
     local has_server=false has_client=false
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        [[ "$svc" == *server* ]] && has_server=true
-        [[ "$svc" == *client* ]] && has_client=true
+        [[ "$svc" == "wstunnel-server.service" ]] && has_server=true
+        [[ "$svc" == "wstunnel-client.service" ]] && has_client=true
     done
 
     # اگر هیچ سرویسی پیدا نشد، از کاربر بپرس
@@ -1411,7 +1403,7 @@ flow_server() {
 
     info "Enabling and starting Caddy..."
     systemctl enable caddy
-    systemctl restart caddy || true
+    systemctl restart caddy
     sleep 1
     if systemctl is-active caddy &>/dev/null; then
         success "Caddy is running."
@@ -2136,15 +2128,15 @@ flow_edit() {
     fi
 }
 
-# Install / refresh the `ws-v2` shortcut in /usr/local/bin/ws-v2
+# Install / refresh the `ws` shortcut in /usr/local/bin/ws
 install_ws_command() {
-    info "Installing 'ws-v2' command shortcut..."
+    info "Installing 'ws' command shortcut..."
     cat > "$WS_BIN" <<'WSEOF'
 #!/bin/bash
-exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh") "$@"
+exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh") "$@"
 WSEOF
     chmod +x "$WS_BIN"
-    success "Shortcut installed: type 'ws-v2' from anywhere to launch this script."
+    success "Shortcut installed: type 'ws' from anywhere to launch this script."
 }
 
 # Update Caddy binary to the latest pinned version
@@ -2308,7 +2300,7 @@ flow_update() {
     local cb; cb=$(caddy_bin)
     $do_wstunnel && [ -n "$wb" ] && info "  wstunnel : $("$wb" --version 2>&1 | head -n1)"
     $do_caddy    && [ -n "$cb" ] && info "  Caddy    : $("$cb" version 2>/dev/null | head -n1)"
-    $do_script   && info "  ws-v2    : ${WS_BIN}  (type 'ws-v2' to relaunch)"
+    $do_script   && info "  ws       : ${WS_BIN}  (type 'ws' to relaunch)"
 }
 
 # ─────────────────────────────────────────────
@@ -2452,7 +2444,7 @@ flow_uninstall() {
     $wstunnel_user_exists && echo -e "  ${CYAN}wstunnel user${RESET}     wstunnel  +  /home/wstunnel/"
     $server_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-server-restart.{timer,service}"
     $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
-    $ws_shortcut_exists   && echo -e "  ${CYAN}ws-v2 shortcut${RESET}    ${WS_BIN}"
+    $ws_shortcut_exists   && echo -e "  ${CYAN}ws shortcut${RESET}       ${WS_BIN}"
     $ca_cert_exists       && echo -e "  ${CYAN}Caddy CA cert${RESET}     /usr/local/share/ca-certificates/caddy*.crt  (+ update-ca-certificates)"
     $sysctl_tuning_exists && echo -e "  ${CYAN}sysctl tuning${RESET}     tcp_max_syn_backlog, netdev_max_backlog, tcp_tw_reuse, tcp_fin_timeout, tcp_syn_retries"
 
@@ -2535,8 +2527,7 @@ result = []
 i = 0
 while i < len(lines):
     # detect start of a top-level block
-    stripped = lines[i].strip()
-    if stripped and not stripped.startswith('#') and not stripped.startswith('}') and '{' in stripped:
+    if lines[i] and lines[i][0] not in (' ', '\t', '#', '}') and '{' in lines[i]:
         block = [lines[i]]
         depth = lines[i].count('{') - lines[i].count('}')
         i += 1
@@ -2636,7 +2627,7 @@ main() {
 
     while true; do
         echo -e "  Quick install:"
-        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)${RESET}"
+        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)${RESET}"
         echo ""
         echo -e "${BOLD}What would you like to do?${RESET}"
         echo ""
