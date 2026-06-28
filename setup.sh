@@ -251,6 +251,8 @@ install_caddy() {
         && apt-get install -y caddy; then
         caddy_ok=true
         success "Caddy installed via apt."
+        mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+        id caddy &>/dev/null && chown caddy:caddy /var/lib/caddy /var/log/caddy || true
     else
         warn "apt install failed — trying binary download from GitHub..."
     fi
