@@ -1355,6 +1355,33 @@ tune_kernel_for_server() {
 }
 
 # ─────────────────────────────────────────────
+# Kernel TCP tuning for the client (many outbound conns to the server)
+# ─────────────────────────────────────────────
+tune_kernel_for_client() {
+    info "Applying kernel TCP tuning for outbound connection load..."
+    local sysctl_conf="/etc/sysctl.conf"
+    # Client opens many short-lived outbound sockets to the server; reuse
+    # TIME_WAIT sockets, release them faster, and widen the ephemeral port range
+    # so high-traffic foreign VPS machines don't exhaust local ports.
+    local params=(
+        "net.ipv4.tcp_tw_reuse=1"
+        "net.ipv4.tcp_fin_timeout=15"
+        "net.ipv4.ip_local_port_range=10000 65535"
+    )
+    for param in "${params[@]}"; do
+        local key="${param%%=*}"
+        local val="${param#*=}"
+        if grep -q "^${key}" "$sysctl_conf" 2>/dev/null; then
+            sed -i "s|^${key}.*|${key} = ${val}|" "$sysctl_conf"
+        else
+            echo "${key} = ${val}" >> "$sysctl_conf"
+        fi
+    done
+    sysctl -p &>/dev/null
+    success "Kernel TCP tuning applied (tcp_tw_reuse=1, ip_local_port_range widened)."
+}
+
+# ─────────────────────────────────────────────
 # Install — Iran VPS (server)
 # ─────────────────────────────────────────────
 flow_server() {
@@ -1679,6 +1706,7 @@ flow_client() {
     install_wstunnel_binary "$WSTUNNEL_VERSION"
     setup_user
     write_client_service
+    tune_kernel_for_client
 
     # ── تایمر ری‌استارت ──────────────────────────────
     if [ "$CLIENT_RESTART_HOURS" != "0" ]; then
@@ -2472,9 +2500,10 @@ flow_uninstall() {
     { ls /usr/local/share/ca-certificates/caddy*.crt &>/dev/null 2>&1 \
       || ls /etc/ssl/certs/caddy*.pem &>/dev/null 2>&1; } && ca_cert_exists=true
 
-    # ── sysctl tuning detection (Iran VPS) ──────
+    # ── sysctl tuning detection (server backlog key OR client port-range key) ──
     local sysctl_tuning_exists=false
-    grep -q "^net.ipv4.tcp_max_syn_backlog" /etc/sysctl.conf 2>/dev/null && sysctl_tuning_exists=true
+    { grep -q "^net.ipv4.tcp_max_syn_backlog" /etc/sysctl.conf 2>/dev/null \
+      || grep -q "^net.ipv4.ip_local_port_range" /etc/sysctl.conf 2>/dev/null; } && sysctl_tuning_exists=true
 
     # Detect if this is an Iran VPS (server) install
     local has_server=false
@@ -2525,7 +2554,7 @@ flow_uninstall() {
     $client_timer_exists  && echo -e "  ${CYAN}restart timer${RESET}     wstunnel-client-restart.{timer,service}"
     $ws_shortcut_exists   && echo -e "  ${CYAN}ws-v2 shortcut${RESET}    ${WS_BIN}"
     $ca_cert_exists       && echo -e "  ${CYAN}Caddy CA cert${RESET}     /usr/local/share/ca-certificates/caddy*.crt  (+ update-ca-certificates)"
-    $sysctl_tuning_exists && echo -e "  ${CYAN}sysctl tuning${RESET}     tcp_max_syn_backlog, netdev_max_backlog, tcp_tw_reuse, tcp_fin_timeout, tcp_syn_retries"
+    $sysctl_tuning_exists && echo -e "  ${CYAN}sysctl tuning${RESET}     tcp_max_syn_backlog, netdev_max_backlog, tcp_tw_reuse, tcp_fin_timeout, tcp_syn_retries, ip_local_port_range"
 
     if $caddy_ours_binary; then
         local cst; cst=$(systemctl is-active caddy 2>/dev/null || echo "inactive")
@@ -2688,12 +2717,13 @@ PYEOF
         success "Caddy CA cert removed and system CA bundle updated."
     fi
 
-    # ── 9. sysctl tuning (Iran VPS) ─────────────
+    # ── 9. sysctl tuning (server + client keys) ─
     if $sysctl_tuning_exists; then
         info "Removing kernel TCP tuning from /etc/sysctl.conf..."
         local _sysctl_conf="/etc/sysctl.conf"
         for _key in net.ipv4.tcp_max_syn_backlog net.core.netdev_max_backlog \
-                    net.ipv4.tcp_syn_retries net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse; do
+                    net.ipv4.tcp_syn_retries net.ipv4.tcp_fin_timeout net.ipv4.tcp_tw_reuse \
+                    net.ipv4.ip_local_port_range; do
             sed -i "/^${_key}/d" "$_sysctl_conf" 2>/dev/null || true
         done
         sysctl -p &>/dev/null || true

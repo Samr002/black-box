@@ -182,6 +182,13 @@ The script automatically applies the following during install:
 | `net.ipv4.tcp_fin_timeout` | 15 s | Releases closed sockets faster |
 | `net.ipv4.tcp_tw_reuse` | 1 | Allows TIME_WAIT socket reuse |
 
+**Kernel (Foreign VPS — applied automatically during client install)**
+| Parameter | Value | Reason |
+|---|---|---|
+| `net.ipv4.tcp_tw_reuse` | 1 | Reuse TIME_WAIT sockets for the many outbound tunnel connections |
+| `net.ipv4.tcp_fin_timeout` | 15 s | Releases closed sockets faster |
+| `net.ipv4.ip_local_port_range` | 10000 65535 | Wider ephemeral port range so busy clients don't exhaust local ports |
+
 ---
 
 ### DNS Setup
@@ -425,6 +432,13 @@ ws-v2
 | `net.ipv4.tcp_syn_retries` | ۳ | شکست سریع‌تر روی مسیرهای مرده |
 | `net.ipv4.tcp_fin_timeout` | ۱۵ ثانیه | آزادسازی سریع‌تر socket‌های بسته |
 | `net.ipv4.tcp_tw_reuse` | ۱ | استفاده مجدد از socket‌های TIME_WAIT |
+
+**کرنل (سرور خارج — هنگام نصب کلاینت خودکار اعمال می‌شود)**
+| پارامتر | مقدار | دلیل |
+|---|---|---|
+| `net.ipv4.tcp_tw_reuse` | ۱ | استفاده مجدد از socketهای TIME_WAIT برای کانکشن‌های خروجی زیاد |
+| `net.ipv4.tcp_fin_timeout` | ۱۵ ثانیه | آزادسازی سریع‌تر socketهای بسته |
+| `net.ipv4.ip_local_port_range` | 10000 65535 | گسترهٔ پورت ephemeral بیشتر تا کلاینت پربار پورت کم نیاورد |
 
 ---
 
