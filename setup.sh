@@ -232,6 +232,8 @@ install_caddy() {
     bin=$(caddy_bin)
     if [ -n "$bin" ]; then
         info "Caddy already installed: $("$bin" version 2>&1 | head -n1)  [$bin]"
+        mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+        id caddy &>/dev/null && chown caddy:caddy /var/lib/caddy /var/log/caddy || true
         return
     fi
 
@@ -484,7 +486,7 @@ install_wstunnel_binary() {
     local tarball="wstunnel_${version}_linux_${arch}.tar.gz"
     local url="https://github.com/erebe/wstunnel/releases/download/v${version}/${tarball}"
     local tmpdir; tmpdir=$(mktemp -d)
-    trap 'rm -rf "$tmpdir"' RETURN
+    trap 'rm -rf "$tmpdir"; trap - RETURN' RETURN
     info "Downloading wstunnel v${version} (${arch})..."
     wget -q --show-progress "$url" -O "${tmpdir}/${tarball}" || error "Download failed: $url"
     tar xzf "${tmpdir}/${tarball}" -C "$tmpdir" wstunnel
