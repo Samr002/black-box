@@ -2617,6 +2617,10 @@ PYEOF
     if $wstunnel_user_exists; then
         rm -rf /home/wstunnel
         userdel wstunnel 2>/dev/null || true
+        # useradd خودکار یک گروه هم‌نام می‌سازد؛ userdel همیشه آن را پاک نمی‌کند
+        if getent group wstunnel &>/dev/null; then
+            groupdel wstunnel 2>/dev/null || true
+        fi
         success "Removed user 'wstunnel' and /home/wstunnel/"
     fi
 
