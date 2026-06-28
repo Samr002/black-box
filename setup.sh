@@ -7,6 +7,10 @@ set -euo pipefail
 
 SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh"
 WS_BIN="/usr/local/bin/ws-v2"
+# Safe upper bound for --connection-min-idle. Higher values make the wstunnel
+# client open many sockets at once on (re)connect, which cancels the control
+# tunnel and breaks the reverse tunnel (confirmed: 50 → 100% handshake failure).
+WS_MIN_IDLE_MAX=10
 
 # ─────────────────────────────────────────────
 # Colors
@@ -460,6 +464,10 @@ parse_client_service() {
     # Idle connection pool size (--connection-min-idle); default 5 if absent
     local _mi; _mi=$(echo "$exec_line" | sed -n 's/.*--connection-min-idle \([0-9]*\).*/\1/p')
     [ -n "$_mi" ] && PARSED_MIN_IDLE="$_mi"
+    # clamp a previously-set unsafe value down to the safe max
+    if [[ "$PARSED_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$PARSED_MIN_IDLE" -gt "$WS_MIN_IDLE_MAX" ]; then
+        PARSED_MIN_IDLE="$WS_MIN_IDLE_MAX"
+    fi
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
@@ -1544,16 +1552,17 @@ flow_client() {
     done
 
     echo ""
-    echo -e "${BOLD}─── Connection Pool (tuning for load) ─────────────────${RESET}"
-    echo -e "  ${YELLOW}Idle tunnels kept ready so new users connect instantly without${RESET}"
-    echo -e "  ${YELLOW}waiting for a fresh WSS handshake. Raise it for busy servers.${RESET}"
-    echo -e "  ${CYAN}Guide:${RESET} ~light <20 users → 5   |   medium 20-60 → 30   |   busy 60+ → 50-100"
+    echo -e "${BOLD}─── Connection Pool (tuning) ──────────────────────────${RESET}"
+    echo -e "  ${YELLOW}Number of idle tunnels kept pre-warmed for instant new connections.${RESET}"
+    echo -e "  ${RED}⚠  Keep this LOW. High values make the client open many sockets at${RESET}"
+    echo -e "  ${RED}   once on (re)connect, which cancels the control tunnel and breaks${RESET}"
+    echo -e "  ${RED}   the reverse tunnel entirely. ${BOLD}5 is recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
     while true; do
         ask PARSED_MIN_IDLE "Idle connection pool size (--connection-min-idle)" "5"
-        if [[ "$PARSED_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$PARSED_MIN_IDLE" -ge 1 ]; then
+        if [[ "$PARSED_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$PARSED_MIN_IDLE" -ge 1 ] && [ "$PARSED_MIN_IDLE" -le "$WS_MIN_IDLE_MAX" ]; then
             break
         fi
-        warn "Enter a positive whole number (e.g. 5, 30, 50)."
+        warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (5 recommended)."
     done
 
     echo ""
@@ -2076,15 +2085,16 @@ edit_client() {
             6)
                 echo ""
                 echo -e "  ${YELLOW}Current pool size: ${PARSED_MIN_IDLE:-5}${RESET}"
-                echo -e "  ${CYAN}Guide:${RESET} light <20 users → 5  |  medium 20-60 → 30  |  busy 60+ → 50-100"
+                echo -e "  ${RED}⚠  Keep LOW. High values break the reverse tunnel on reconnect${RESET}"
+                echo -e "  ${RED}   (thundering herd cancels the control tunnel). 5 recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
                 echo ""
                 local NEW_MIN_IDLE
                 while true; do
                     ask NEW_MIN_IDLE "New idle connection pool size" "${PARSED_MIN_IDLE:-5}"
-                    if [[ "$NEW_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$NEW_MIN_IDLE" -ge 1 ]; then
+                    if [[ "$NEW_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$NEW_MIN_IDLE" -ge 1 ] && [ "$NEW_MIN_IDLE" -le "$WS_MIN_IDLE_MAX" ]; then
                         break
                     fi
-                    warn "Enter a positive whole number (e.g. 5, 30, 50)."
+                    warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (5 recommended)."
                 done
                 if [ "$NEW_MIN_IDLE" != "${PARSED_MIN_IDLE:-5}" ]; then
                     PARSED_MIN_IDLE="$NEW_MIN_IDLE"

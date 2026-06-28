@@ -157,7 +157,7 @@ The script automatically applies the following during install:
 | Setting | Value | Reason |
 |---|---|---|
 | `--websocket-ping-frequency-sec` | 30 s | Keeps connections alive through idle firewalls |
-| `--connection-min-idle` | 5 (configurable) | Pre-warmed idle tunnels so new users connect instantly. Raise for busy servers (medium 20-60 users → 30, busy 60+ → 50-100); set at install or via Edit menu |
+| `--connection-min-idle` | 5 (configurable, max 10) | Pre-warmed idle tunnels so new users connect instantly. **Keep low** — high values make the client open many sockets at once on reconnect, which cancels the control tunnel and breaks the reverse tunnel. Settable at install / Edit menu, capped at 10 |
 | `--dns-resolver dns://1.1.1.1` | Cloudflare DNS over UDP | Bypasses local DNS manipulation; prevents DNS leaks |
 | `--http-headers User-Agent` | Chrome 120 UA string | WebSocket handshake looks like a real browser request |
 | `--http-headers Origin` | `https://DOMAIN` | Valid Origin header — matches what a browser would send |
@@ -401,7 +401,7 @@ ws-v2
 | تنظیم | مقدار | دلیل |
 |---|---|---|
 | `--websocket-ping-frequency-sec` | ۳۰ ثانیه | زنده نگه داشتن اتصال از طریق فایروال‌های ایدل |
-| `--connection-min-idle` | ۵ (قابل تنظیم) | تونل‌های آمادهٔ از پیش‌گرم‌شده تا کاربر جدید فوری وصل شود. برای سرورهای پربار بالا ببر (۲۰-۶۰ کاربر → ۳۰، ۶۰+ → ۵۰-۱۰۰)؛ هنگام نصب یا از منوی Edit |
+| `--connection-min-idle` | ۵ (قابل تنظیم، حداکثر ۱۰) | تونل‌های آمادهٔ از پیش‌گرم‌شده تا کاربر جدید فوری وصل شود. **پایین نگه دار** — مقدار بالا باعث می‌شود کلاینت هنگام reconnect چند سوکت همزمان باز کند که تونل کنترلی را cancel و تونل معکوس را خراب می‌کند. هنگام نصب/منوی Edit قابل تنظیم، سقف ۱۰ |
 | `--dns-resolver dns://1.1.1.1` | DNS مستقیم | دور زدن دستکاری DNS محلی و جلوگیری از DNS leak |
 | `--http-headers User-Agent` | Chrome 120 | WebSocket handshake شبیه مرورگر واقعی |
 | `--http-headers Origin` | `https://DOMAIN` | هدر Origin معتبر — مشابه درخواست مرورگر |
