@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh"
 WS_BIN="/usr/local/bin/ws-v2"
 
 # ─────────────────────────────────────────────
@@ -105,8 +105,16 @@ pick_action() {
 # ─────────────────────────────────────────────
 # Shared helpers
 # ─────────────────────────────────────────────
+check_python3() {
+    if ! command -v python3 &>/dev/null; then
+        info "python3 not found. Installing python3..."
+        apt-get update -qq && apt-get install -y python3
+    fi
+}
+
 check_root() {
     [ "$EUID" -eq 0 ] || error "Run as root: sudo bash setup.sh"
+    check_python3
 }
 
 detect_services() {
@@ -167,7 +175,7 @@ install_caddy() {
 
     # روش اول: apt از مخزن رسمی Caddy
     info "Trying apt (official Caddy repo)..."
-    if apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl \
+    if apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl gnupg \
         && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
             | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
         && curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
@@ -287,7 +295,7 @@ configure_caddyfile() {
         # فایل وجود ندارد یا خالی است — از صفر بنویس
         printf '%s\n\n%s\n' "$global_block" "$block" > "$caddyfile"
         success "Caddyfile created with domain ${domain}."
-    elif grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
+    elif grep -qE "^\s*${domain//./\.}\s*\{" "$caddyfile" 2>/dev/null; then
         # بلاک این دامنه از قبل وجود دارد — با block جدید جایگزین کن
         info "Updating ${domain} in Caddyfile..."
         local _block_tmp; _block_tmp=$(mktemp)
@@ -302,7 +310,7 @@ with open(cfile) as f:
 result = []
 i = 0
 replaced = False
-dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
+dom_pat = re.compile(r'^\s*' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if not replaced and dom_pat.match(lines[i]):
         depth = lines[i].count('{') - lines[i].count('}')
@@ -351,7 +359,7 @@ remove_caddyfile_domain() {
     local caddyfile="/etc/caddy/Caddyfile"
     [ -f "$caddyfile" ] || return
     # اگه دامنه اصلاً در فایل نیست، کاری نکن
-    if ! grep -qF "${domain} {" "$caddyfile" 2>/dev/null; then
+    if ! grep -qE "^\s*${domain//./\.}\s*\{" "$caddyfile" 2>/dev/null; then
         info "Domain ${domain} not found in Caddyfile — nothing to remove."
         return
     fi
@@ -362,7 +370,7 @@ with open(path) as f:
     lines = f.read().split('\n')
 result = []
 i = 0
-dom_pat = re.compile(r'^' + re.escape(domain) + r'\s*\{')
+dom_pat = re.compile(r'^\s*' + re.escape(domain) + r'\s*\{')
 while i < len(lines):
     if dom_pat.match(lines[i]):
         # Consume the entire block
@@ -479,7 +487,7 @@ except Exception:
     sys.exit(0)
 i = 0
 while i < len(lines):
-    m = re.match(r'^(\S+)\s*\{', lines[i])
+    m = re.match(r'^\s*([^\s#]+)\s*\{', lines[i])
     if m:
         domain = m.group(1)
         block = [lines[i]]
@@ -592,7 +600,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable wstunnel-client.service
-    systemctl restart wstunnel-client.service
+    systemctl restart wstunnel-client.service || warn "Client service failed to start. Check status below."
     echo ""
     systemctl status wstunnel-client.service --no-pager
     echo ""
@@ -629,7 +637,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
     systemctl enable wstunnel-server.service
-    systemctl restart wstunnel-server.service
+    systemctl restart wstunnel-server.service || warn "Server service failed to start. Check status below."
     echo ""
     systemctl status wstunnel-server.service --no-pager
     echo ""
@@ -789,8 +797,10 @@ diagnose_server() {
         fi
         # بررسی محتوای Caddyfile
         if [ -f "$caddyfile" ]; then
-            if grep -q "respond 404" "$caddyfile" 2>/dev/null; then
-                check_fail "Caddyfile has 'respond 404' — this blocks all wstunnel connections!"
+            if grep -qE "(localhost|127\.0\.0\.1):${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
+                check_ok "Caddyfile correctly proxies to :${PARSED_BIND_PORT}"
+            elif grep -q "respond 404" "$caddyfile" 2>/dev/null; then
+                check_fail "Caddyfile has 'respond 404' and does not proxy to :${PARSED_BIND_PORT} — this blocks all wstunnel connections!"
                 echo -e "         ${RED}Fix on Iran VPS:${RESET}"
                 echo -e "         ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
                 echo -e "         ${CYAN}<your-domain> {${RESET}"
@@ -799,8 +809,6 @@ diagnose_server() {
                 echo -e "         ${CYAN}}${RESET}"
                 echo -e "         ${CYAN}EOF${RESET}"
                 echo -e "         ${CYAN}systemctl reload caddy${RESET}"
-            elif grep -qE "(localhost|127\.0\.0\.1):${PARSED_BIND_PORT}" "$caddyfile" 2>/dev/null; then
-                check_ok "Caddyfile correctly proxies to :${PARSED_BIND_PORT}"
             else
                 check_warn "Caddyfile may not proxy to :${PARSED_BIND_PORT}"
                 echo -e "         ${YELLOW}→ cat /etc/caddy/Caddyfile${RESET}"
@@ -1253,8 +1261,8 @@ flow_diagnose() {
 
     local has_server=false has_client=false
     for svc in "${FOUND_SVCS[@]+"${FOUND_SVCS[@]}"}"; do
-        [[ "$svc" == "wstunnel-server.service" ]] && has_server=true
-        [[ "$svc" == "wstunnel-client.service" ]] && has_client=true
+        [[ "$svc" == *server* ]] && has_server=true
+        [[ "$svc" == *client* ]] && has_client=true
     done
 
     # اگر هیچ سرویسی پیدا نشد، از کاربر بپرس
@@ -1403,7 +1411,7 @@ flow_server() {
 
     info "Enabling and starting Caddy..."
     systemctl enable caddy
-    systemctl restart caddy
+    systemctl restart caddy || true
     sleep 1
     if systemctl is-active caddy &>/dev/null; then
         success "Caddy is running."
@@ -2527,7 +2535,8 @@ result = []
 i = 0
 while i < len(lines):
     # detect start of a top-level block
-    if lines[i] and lines[i][0] not in (' ', '\t', '#', '}') and '{' in lines[i]:
+    stripped = lines[i].strip()
+    if stripped and not stripped.startswith('#') and not stripped.startswith('}') and '{' in stripped:
         block = [lines[i]]
         depth = lines[i].count('{') - lines[i].count('}')
         i += 1
@@ -2627,7 +2636,7 @@ main() {
 
     while true; do
         echo -e "  Quick install:"
-        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)${RESET}"
+        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)${RESET}"
         echo ""
         echo -e "${BOLD}What would you like to do?${RESET}"
         echo ""
