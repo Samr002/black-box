@@ -335,7 +335,9 @@ configure_caddyfile() {
         # Path obfuscation via Caddy handle block — only the secret path reaches wstunnel.
         # Named-matcher with header conditions does not reliably match WebSocket upgrades.
         block="${domain} {
-    tls internal
+    tls internal {
+        curves x25519 secp256r1 secp384r1
+    }
     header -Server
     handle ${upgrade_path}* {
         reverse_proxy 127.0.0.1:${port} {
@@ -349,7 +351,9 @@ configure_caddyfile() {
 }"
     else
         block="${domain} {
-    tls internal
+    tls internal {
+        curves x25519 secp256r1 secp384r1
+    }
     header -Server
     reverse_proxy 127.0.0.1:${port} {
         flush_interval -1
