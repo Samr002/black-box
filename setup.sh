@@ -895,6 +895,7 @@ diagnose_server() {
                 echo -e "         ${RED}Fix on Iran VPS:${RESET}"
                 echo -e "         ${CYAN}cat > /etc/caddy/Caddyfile <<'EOF'${RESET}"
                 echo -e "         ${CYAN}<your-domain> {${RESET}"
+                echo -e "         ${CYAN}    tls internal${RESET}"
                 echo -e "         ${CYAN}    header -Server${RESET}"
                 echo -e "         ${CYAN}    reverse_proxy localhost:${PARSED_BIND_PORT}${RESET}"
                 echo -e "         ${CYAN}}${RESET}"
@@ -1143,12 +1144,15 @@ diagnose_client() {
             ;;
         "404")
             https_reachable=true
-            check_fail "Iran VPS returns 404 — Caddyfile is misconfigured or has 'respond 404'"
-            echo -e "         ${RED}Caddy is running but blocking WebSocket connections!${RESET}"
-            echo -e "         ${YELLOW}→ On Iran VPS fix Caddyfile:${RESET}"
-            echo -e "         ${CYAN}           reverse_proxy localhost:2018  (remove @ws and respond 404)${RESET}"
-            echo -e "         ${YELLOW}→ Then: systemctl reload caddy${RESET}"
-            caddy_broken=true
+            if [ -n "${PARSED_UPGRADE_PATH:-}" ]; then
+                check_ok "Iran VPS returns 404 for root URL — expected (path-obfuscated setup, upgrade path: '${PARSED_UPGRADE_PATH}')"
+            else
+                check_fail "Iran VPS returns 404 — Caddyfile may be missing reverse_proxy directive"
+                echo -e "         ${RED}Caddy is running but not proxying to wstunnel!${RESET}"
+                echo -e "         ${YELLOW}→ On Iran VPS check Caddyfile:${RESET}"
+                echo -e "         ${CYAN}   cat /etc/caddy/Caddyfile${RESET}"
+                caddy_broken=true
+            fi
             ;;
         *)
             https_reachable=true
