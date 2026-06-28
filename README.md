@@ -164,7 +164,7 @@ The script automatically applies the following during install:
 | `--http-upgrade-path-prefix` | secret path | Sends upgrade request to the correct obfuscated path (URL path is ignored by wstunnel v10) |
 | `LimitNOFILE` | 65 536 | Handles many simultaneous tunnel connections |
 | `TasksMax` | 65 536 | Prevents systemd from hitting the default task limit (~1027) |
-| `RestartSec` | 20 s | Prevents reconnect storms on repeated failures |
+| `RestartSec` | 5 s | Fast reconnect if the wstunnel process exits (consistent with the server) |
 
 **wstunnel server (Iran VPS)**
 | Setting | Value | Reason |
@@ -408,7 +408,7 @@ ws-v2
 | `--http-upgrade-path-prefix` | مسیر مخفی | ارسال درخواست upgrade به مسیر صحیح (URL path در wstunnel v10 نادیده گرفته می‌شود) |
 | `LimitNOFILE` | ۶۵٬۵۳۶ | پشتیبانی از اتصال‌های همزمان زیاد |
 | `TasksMax` | ۶۵٬۵۳۶ | جلوگیری از رسیدن systemd به محدودیت پیش‌فرض |
-| `RestartSec` | ۲۰ ثانیه | جلوگیری از reconnect storm در خطاهای پشت‌سرهم |
+| `RestartSec` | ۵ ثانیه | اتصال مجدد سریع اگر پروسهٔ wstunnel خارج شود (هماهنگ با سرور) |
 
 **wstunnel سرور (سرور ایران)**
 | تنظیم | مقدار | دلیل |
