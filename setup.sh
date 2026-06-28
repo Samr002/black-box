@@ -266,10 +266,17 @@ configure_caddyfile() {
         # Named matcher + exclusive handle blocks — required in Caddy v2 for reliable
         # path-based routing. Inline `handle /path*` mixed with bare `respond 404`
         # causes all requests to hit the 404 catch-all instead of the reverse proxy.
+        # wstunnel v10 client prepends a leading '/' to --http-upgrade-path-prefix,
+        # so a configured prefix of '/svc/sync/abc' arrives as '//svc/sync/abc/events'.
+        # A plain `path /svc/sync/abc*` matcher would NOT match the double slash and
+        # everything falls through to the 404 handler. path_regexp ^/+<prefix> matches
+        # one-or-more leading slashes, so it works whether the prefix has a leading
+        # slash or not.
+        local _re_path="${upgrade_path#/}"
         block="${domain} {
     tls internal
     header -Server
-    @wstunnel path ${upgrade_path}*
+    @wstunnel path_regexp ^/+${_re_path}
     handle @wstunnel {
         reverse_proxy 127.0.0.1:${port} {
             flush_interval -1
@@ -579,6 +586,12 @@ write_client_service() {
     local exec_full
     exec_full=$(build_client_exec)
     info "Writing /etc/systemd/system/wstunnel-client.service ..."
+    # یک drop-in override کهنه (از اجرا/دیباگ قبلی) روی ExecStart ما سایه می‌اندازد
+    # و باعث می‌شود prefix قدیمی اجرا شود — قبل از نوشتن، آن را پاک کن.
+    if [ -d /etc/systemd/system/wstunnel-client.service.d ]; then
+        warn "Removing stale systemd drop-in for wstunnel-client.service"
+        rm -rf /etc/systemd/system/wstunnel-client.service.d
+    fi
     cat > /etc/systemd/system/wstunnel-client.service <<EOF
 [Unit]
 Description=WStunnel Client
@@ -617,6 +630,11 @@ write_server_service() {
     # breaks ReverseTcp connections in wstunnel v10, so path routing lives in the Caddyfile.
 
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
+    # drop-in override کهنه را پاک کن تا ExecStart ما واقعاً اعمال شود.
+    if [ -d /etc/systemd/system/wstunnel-server.service.d ]; then
+        warn "Removing stale systemd drop-in for wstunnel-server.service"
+        rm -rf /etc/systemd/system/wstunnel-server.service.d
+    fi
     cat > /etc/systemd/system/wstunnel-server.service <<EOF
 [Unit]
 Description=WStunnel Server
@@ -2488,6 +2506,8 @@ flow_uninstall() {
         systemctl stop    "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
         rm -f "/etc/systemd/system/${svc}"
+        # drop-in override dir را هم پاک کن تا بازمانده‌ای نماند
+        rm -rf "/etc/systemd/system/${svc}.d"
         success "Removed /etc/systemd/system/${svc}"
     done
 
