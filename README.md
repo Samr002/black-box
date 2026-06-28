@@ -36,7 +36,7 @@ VPN / Service  :LOCAL_PORT
 Run this **once** on either VPS — the script detects the appropriate role automatically:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh)
 ```
 
 After the first install, a `ws-v2` shortcut is placed at `/usr/local/bin/ws-v2`.
@@ -123,7 +123,7 @@ ws-v2
 **Update**
 - Updates wstunnel binary to any chosen version
 - Updates Caddy binary (if installed by the script)
-- Refreshes the `ws` script shortcut to the latest version from GitHub
+- Refreshes the `ws-v2` script shortcut to the latest version from GitHub
 - Restarts affected services automatically
 
 **Full Uninstall**
@@ -146,7 +146,7 @@ The script automatically applies the following during install:
 |---|---|---|
 | `protocols h1` | HTTP/1.1 only | Prevents HTTP/2 ALPN negotiation issues with wstunnel |
 | `enable_full_duplex` | on | Allows simultaneous read/write on HTTP/1.1 connections |
-| `handle /path*` | path routing | Only the secret path reaches wstunnel; everything else returns 404 |
+| `@wstunnel path_regexp ^/+path` | path routing | Named matcher + exclusive `handle` blocks; tolerates the leading slash wstunnel prepends, so only the secret path reaches wstunnel and everything else returns 404 |
 | `flush_interval -1` | immediate | Enables real-time WebSocket streaming without buffering |
 | `reverse_proxy 127.0.0.1:…` | IP literal | Avoids DNS resolution timeout for `localhost` under load |
 | `response_header_timeout 0` | no timeout | Prevents proxy from closing long-lived WebSocket connections |
@@ -283,13 +283,13 @@ VPN / سرویس  :LOCAL_PORT
 این دستور را **یک‌بار** روی هر VPS اجرا کن — اسکریپت نقش مناسب را خودکار تشخیص می‌دهد:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh)
 ```
 
-پس از نصب اول، میانبر `ws` در `/usr/local/bin/ws` قرار می‌گیرد:
+پس از نصب اول، میانبر `ws-v2` در `/usr/local/bin/ws-v2` قرار می‌گیرد:
 
 ```bash
-ws
+ws-v2
 ```
 
 ---
@@ -369,7 +369,7 @@ ws
 **بروزرسانی**
 - بروزرسانی باینری wstunnel به هر نسخه دلخواه
 - بروزرسانی باینری Caddy (اگر توسط اسکریپت نصب شده باشد)
-- بروزرسانی میانبر `ws` به آخرین نسخه از GitHub
+- بروزرسانی میانبر `ws-v2` به آخرین نسخه از GitHub
 - ری‌استارت خودکار سرویس‌های مرتبط
 
 **حذف کامل**
@@ -390,7 +390,7 @@ ws
 |---|---|---|
 | `protocols h1` | فقط HTTP/1.1 | جلوگیری از مشکلات ALPN در HTTP/2 با wstunnel |
 | `enable_full_duplex` | فعال | امکان خواندن و نوشتن همزمان روی اتصال HTTP/1.1 |
-| `handle /path*` | مسیریابی path | فقط مسیر مخفی به wstunnel می‌رسد، بقیه ۴۰۴ |
+| `@wstunnel path_regexp ^/+path` | مسیریابی path | matcher نام‌دار + بلاک‌های `handle` مجزا؛ اسلش ابتدایی که wstunnel اضافه می‌کند را تحمل می‌کند، فقط مسیر مخفی به wstunnel می‌رسد و بقیه ۴۰۴ |
 | `flush_interval -1` | فوری | ارسال بلادرنگ داده‌های WebSocket بدون بافرینگ |
 | `reverse_proxy 127.0.0.1:…` | IP مستقیم | جلوگیری از timeout DNS برای `localhost` زیر بار |
 | `response_header_timeout 0` | بدون timeout | حفظ اتصال‌های WebSocket طولانی‌مدت |

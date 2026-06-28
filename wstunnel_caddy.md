@@ -4,7 +4,7 @@
 > Use the script for new setups — this document is kept as a low-level reference only.
 >
 > ```bash
-> bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/main/setup.sh)
+> bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh)
 > ```
 
 ---

@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh"
 WS_BIN="/usr/local/bin/ws-v2"
 
 # ─────────────────────────────────────────────
@@ -2163,7 +2163,7 @@ install_ws_command() {
     info "Installing 'ws-v2' command shortcut..."
     cat > "$WS_BIN" <<'WSEOF'
 #!/bin/bash
-exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh") "$@"
+exec bash <(curl -fsSL "https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh") "$@"
 WSEOF
     chmod +x "$WS_BIN"
     success "Shortcut installed: type 'ws-v2' from anywhere to launch this script."
@@ -2660,7 +2660,7 @@ main() {
 
     while true; do
         echo -e "  Quick install:"
-        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/WS-V2/setup.sh)${RESET}"
+        echo -e "  ${CYAN}bash <(curl -fsSL https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh)${RESET}"
         echo ""
         echo -e "${BOLD}What would you like to do?${RESET}"
         echo ""
