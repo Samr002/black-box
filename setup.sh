@@ -50,6 +50,7 @@ PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
 declare -a PARSED_DOMAINS=()
 PARSED_UPGRADE_PATH=""
+PARSED_MIN_IDLE="5"
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -441,7 +442,7 @@ setup_user() {
 # ─────────────────────────────────────────────
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
-    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH=""
+    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH="" PARSED_MIN_IDLE="5"
     if [ ! -f "$svc_file" ]; then
         warn "Client service file not found — some values will be empty"
         return
@@ -456,6 +457,9 @@ parse_client_service() {
     [ -z "$PARSED_WSS_PORT" ] && PARSED_WSS_PORT="443"
     # Path comes from --http-upgrade-path-prefix flag (not the URL path)
     PARSED_UPGRADE_PATH=$(echo "$exec_line" | sed -n 's/.*--http-upgrade-path-prefix \([^ ]*\).*/\1/p')
+    # Idle connection pool size (--connection-min-idle); default 5 if absent
+    local _mi; _mi=$(echo "$exec_line" | sed -n 's/.*--connection-min-idle \([0-9]*\).*/\1/p')
+    [ -n "$_mi" ] && PARSED_MIN_IDLE="$_mi"
     PARSED_FLAGS=()
     while IFS= read -r f; do
         [ -n "$f" ] && PARSED_FLAGS+=("$f")
@@ -527,6 +531,7 @@ show_client_state() {
     else
         echo -e "  ${BOLD}Upgrade path    :${RESET}  ${YELLOW}(none — obfuscation disabled)${RESET}"
     fi
+    echo -e "  ${BOLD}Idle pool size  :${RESET}  ${YELLOW}${PARSED_MIN_IDLE:-5}${RESET}  ${CYAN}(--connection-min-idle)${RESET}"
     echo ""
     echo -e "  ${BOLD}Port mappings:${RESET}"
     if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
@@ -565,7 +570,7 @@ show_server_state() {
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
-    result+=" --connection-min-idle 5"
+    result+=" --connection-min-idle ${PARSED_MIN_IDLE:-5}"
     result+=" --dns-resolver dns://1.1.1.1"
     result+=" --http-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
     result+=" --http-headers \"Origin: https://${PARSED_DOMAIN}\""
@@ -1539,6 +1544,19 @@ flow_client() {
     done
 
     echo ""
+    echo -e "${BOLD}─── Connection Pool (tuning for load) ─────────────────${RESET}"
+    echo -e "  ${YELLOW}Idle tunnels kept ready so new users connect instantly without${RESET}"
+    echo -e "  ${YELLOW}waiting for a fresh WSS handshake. Raise it for busy servers.${RESET}"
+    echo -e "  ${CYAN}Guide:${RESET} ~light <20 users → 5   |   medium 20-60 → 30   |   busy 60+ → 50-100"
+    while true; do
+        ask PARSED_MIN_IDLE "Idle connection pool size (--connection-min-idle)" "5"
+        if [[ "$PARSED_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$PARSED_MIN_IDLE" -ge 1 ]; then
+            break
+        fi
+        warn "Enter a positive whole number (e.g. 5, 30, 50)."
+    done
+
+    echo ""
     echo -e "${BOLD}─── Caddy CA Certificate (TLS Trust) ──────────────────${RESET}"
     echo -e "  ${YELLOW}Iran VPS uses 'tls internal'. This VPS must trust Caddy's CA cert.${RESET}"
     echo -e "  ${YELLOW}Get the cert from Iran VPS:${RESET}"
@@ -1930,13 +1948,14 @@ edit_client() {
         echo -e "  ${CYAN}3${RESET}) Remove a port mapping"
         echo -e "  ${CYAN}4${RESET}) Change Iran VPS domain / WSS port"
         echo -e "  ${CYAN}5${RESET}) Change WebSocket upgrade path (obfuscation)"
-        echo -e "  ${CYAN}6${RESET}) Configure scheduled restart"
-        echo -e "  ${CYAN}7${RESET}) Apply changes and restart service"
-        echo -e "  ${CYAN}8${RESET}) Back to main menu (discard changes)"
+        echo -e "  ${CYAN}6${RESET}) Change idle connection pool size (load tuning)"
+        echo -e "  ${CYAN}7${RESET}) Configure scheduled restart"
+        echo -e "  ${CYAN}8${RESET}) Apply changes and restart service"
+        echo -e "  ${CYAN}9${RESET}) Back to main menu (discard changes)"
         echo ""
 
         local choice
-        read -rp "$(echo -e "  ${BOLD}Enter 1-8${RESET}: ")" choice
+        read -rp "$(echo -e "  ${BOLD}Enter 1-9${RESET}: ")" choice
 
         case "$choice" in
             1)
@@ -2055,6 +2074,26 @@ edit_client() {
                 fi
                 ;;
             6)
+                echo ""
+                echo -e "  ${YELLOW}Current pool size: ${PARSED_MIN_IDLE:-5}${RESET}"
+                echo -e "  ${CYAN}Guide:${RESET} light <20 users → 5  |  medium 20-60 → 30  |  busy 60+ → 50-100"
+                echo ""
+                local NEW_MIN_IDLE
+                while true; do
+                    ask NEW_MIN_IDLE "New idle connection pool size" "${PARSED_MIN_IDLE:-5}"
+                    if [[ "$NEW_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$NEW_MIN_IDLE" -ge 1 ]; then
+                        break
+                    fi
+                    warn "Enter a positive whole number (e.g. 5, 30, 50)."
+                done
+                if [ "$NEW_MIN_IDLE" != "${PARSED_MIN_IDLE:-5}" ]; then
+                    PARSED_MIN_IDLE="$NEW_MIN_IDLE"
+                    changed=true; success "Idle pool size set to ${PARSED_MIN_IDLE}."
+                else
+                    info "No changes."
+                fi
+                ;;
+            7)
                 local cur_hc; cur_hc=$(get_restart_interval "client")
                 ask_restart_interval NEW_RESTART_HC "$cur_hc"
                 if [ "$NEW_RESTART_HC" = "0" ]; then
@@ -2065,7 +2104,7 @@ edit_client() {
                     info "No changes to restart timer."
                 fi
                 ;;
-            7)
+            8)
                 ! $changed && { info "No changes to apply."; continue; }
                 if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
                     warn "No port mappings configured — wstunnel will start with no -R flags."
@@ -2093,10 +2132,10 @@ edit_client() {
                 fi
                 return
                 ;;
-            8)
+            9)
                 info "No changes applied."; return ;;
             *)
-                warn "Please enter a number between 1 and 8." ;;
+                warn "Please enter a number between 1 and 9." ;;
         esac
     done
 }

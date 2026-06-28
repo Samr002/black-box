@@ -112,7 +112,7 @@ ws-v2
 
 **Edit Menu**
 - *Iran VPS*: add/remove domains, change upgrade path, change bind IP & port, configure auto-restart
-- *Foreign VPS*: add/edit/remove port mappings, change domain & WSS port, change upgrade path, configure auto-restart
+- *Foreign VPS*: add/edit/remove port mappings, change domain & WSS port, change upgrade path, change idle connection pool size, configure auto-restart
 
 **Diagnose**
 - Checks wstunnel service status, Caddy status, port reachability, and TLS trust
@@ -157,7 +157,7 @@ The script automatically applies the following during install:
 | Setting | Value | Reason |
 |---|---|---|
 | `--websocket-ping-frequency-sec` | 30 s | Keeps connections alive through idle firewalls |
-| `--connection-min-idle` | 5 | Pre-warms connections — reduces latency on first user connect |
+| `--connection-min-idle` | 5 (configurable) | Pre-warmed idle tunnels so new users connect instantly. Raise for busy servers (medium 20-60 users → 30, busy 60+ → 50-100); set at install or via Edit menu |
 | `--dns-resolver dns://1.1.1.1` | Cloudflare DNS over UDP | Bypasses local DNS manipulation; prevents DNS leaks |
 | `--http-headers User-Agent` | Chrome 120 UA string | WebSocket handshake looks like a real browser request |
 | `--http-headers Origin` | `https://DOMAIN` | Valid Origin header — matches what a browser would send |
@@ -358,7 +358,7 @@ ws-v2
 
 **منوی Edit**
 - *سرور ایران*: اضافه/حذف دامنه، تغییر مسیر مخفی، تغییر Bind IP و پورت، تنظیم ری‌استارت
-- *سرور خارج*: اضافه/ویرایش/حذف mapping پورت، تغییر دامنه و پورت WSS، تغییر مسیر مخفی، تنظیم ری‌استارت
+- *سرور خارج*: اضافه/ویرایش/حذف mapping پورت، تغییر دامنه و پورت WSS، تغییر مسیر مخفی، تغییر اندازهٔ استخر اتصال idle، تنظیم ری‌استارت
 
 **تشخیص مشکل (Diagnose)**
 - بررسی وضعیت سرویس wstunnel، وضعیت Caddy، دسترسی به پورت‌ها و اعتماد TLS
@@ -401,7 +401,7 @@ ws-v2
 | تنظیم | مقدار | دلیل |
 |---|---|---|
 | `--websocket-ping-frequency-sec` | ۳۰ ثانیه | زنده نگه داشتن اتصال از طریق فایروال‌های ایدل |
-| `--connection-min-idle` | ۵ | آماده نگه داشتن ۵ اتصال — کاهش تأخیر |
+| `--connection-min-idle` | ۵ (قابل تنظیم) | تونل‌های آمادهٔ از پیش‌گرم‌شده تا کاربر جدید فوری وصل شود. برای سرورهای پربار بالا ببر (۲۰-۶۰ کاربر → ۳۰، ۶۰+ → ۵۰-۱۰۰)؛ هنگام نصب یا از منوی Edit |
 | `--dns-resolver dns://1.1.1.1` | DNS مستقیم | دور زدن دستکاری DNS محلی و جلوگیری از DNS leak |
 | `--http-headers User-Agent` | Chrome 120 | WebSocket handshake شبیه مرورگر واقعی |
 | `--http-headers Origin` | `https://DOMAIN` | هدر Origin معتبر — مشابه درخواست مرورگر |
