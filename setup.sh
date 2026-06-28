@@ -804,8 +804,8 @@ WantedBy=timers.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable "${timer_name}.timer"
-    systemctl start  "${timer_name}.timer"
+    systemctl enable "${timer_name}.timer" || warn "Failed to enable ${timer_name}.timer"
+    systemctl start  "${timer_name}.timer" || warn "Failed to start ${timer_name}.timer"
     success "Restart timer enabled: every ${hours} hour(s)."
     echo -e "  ${YELLOW}Check: systemctl status ${timer_name}.timer${RESET}"
 }
@@ -1526,7 +1526,7 @@ flow_server() {
     done
 
     info "Enabling and starting Caddy..."
-    systemctl enable caddy
+    systemctl enable caddy || true
     systemctl restart caddy 2>/dev/null || true
     sleep 2
     if systemctl is-active caddy &>/dev/null; then
@@ -1543,7 +1543,7 @@ flow_server() {
             echo -e "  ${YELLOW}If you installed Caddy via apt AND via binary, you may have two Caddy instances.${RESET}"
             echo -e "  To fix: ${CYAN}apt-get remove --purge caddy && systemctl start caddy${RESET}"
         else
-            journalctl -u caddy -n 20 --no-pager | sed 's/^/    /'
+            journalctl -u caddy -n 20 --no-pager | sed 's/^/    /' || true
         fi
     fi
 
