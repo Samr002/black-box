@@ -162,6 +162,7 @@ The script automatically applies the following during install:
 | `--http-headers User-Agent` | Chrome 120 UA string | WebSocket handshake looks like a real browser request |
 | `--http-headers Origin` | `https://DOMAIN` | Valid Origin header — matches what a browser would send |
 | `--http-upgrade-path-prefix` | secret path | Sends upgrade request to the correct obfuscated path (URL path is ignored by wstunnel v10) |
+| `TOKIO_WORKER_THREADS` | max(nproc, 4) | Same reason as the server — a busy client (many users) on a single-core VPS shouldn't bottleneck the tunnel on one worker thread |
 | `LimitNOFILE` | 65 536 | Handles many simultaneous tunnel connections |
 | `TasksMax` | 65 536 | Prevents systemd from hitting the default task limit (~1027) |
 | `RestartSec` | 5 s | Fast reconnect if the wstunnel process exits (consistent with the server) |
@@ -171,6 +172,7 @@ The script automatically applies the following during install:
 |---|---|---|
 | `--websocket-ping-frequency-sec` | 30 s | Keeps connections alive through idle firewalls |
 | No `--restrict-to` | — | This flag blocks ALL reverse tunnel connections in wstunnel v10; path restriction is done by Caddy instead |
+| `TOKIO_WORKER_THREADS` | max(nproc, 4) | wstunnel is I/O-bound; on a single-core VPS one worker thread starves the reverse-listener `accept()` loop under load → listen backlog fills (Recv-Q pinned at 128) → dropped connections / intermittent timeouts. Forcing ≥4 threads keeps `accept()` responsive. (`--nb-worker-threads` flag is a no-op upstream — the env var is the real control.) |
 | `RestartSec` | 5 s | Fast recovery after crash |
 
 **Kernel (Iran VPS — applied automatically during install)**
@@ -414,6 +416,7 @@ ws-v2
 | `--http-headers Origin` | `https://DOMAIN` | هدر Origin معتبر — مشابه درخواست مرورگر |
 | `--http-upgrade-path-prefix` | مسیر مخفی | ارسال درخواست upgrade به مسیر صحیح (URL path در wstunnel v10 نادیده گرفته می‌شود) |
 | `LimitNOFILE` | ۶۵٬۵۳۶ | پشتیبانی از اتصال‌های همزمان زیاد |
+| `TOKIO_WORKER_THREADS` | max(nproc, 4) | مثل سرور — کلاینت پربار (کاربر زیاد) روی VPS تک‌هسته نباید روی یک نخ گلوگاه شود |
 | `TasksMax` | ۶۵٬۵۳۶ | جلوگیری از رسیدن systemd به محدودیت پیش‌فرض |
 | `RestartSec` | ۵ ثانیه | اتصال مجدد سریع اگر پروسهٔ wstunnel خارج شود (هماهنگ با سرور) |
 
@@ -422,6 +425,7 @@ ws-v2
 |---|---|---|
 | `--websocket-ping-frequency-sec` | ۳۰ ثانیه | زنده نگه داشتن اتصال |
 | بدون `--restrict-to` | — | این فلگ در wstunnel v10 همه تونل‌های معکوس را مسدود می‌کند؛ محدودیت path توسط Caddy انجام می‌شود |
+| `TOKIO_WORKER_THREADS` | max(nproc, 4) | wstunnel ‏I/O-bound است؛ روی VPS تک‌هسته یک نخِ تنها، حلقهٔ `accept()` لیسنرِ معکوس را زیر بار گرسنه می‌گذارد → صف backlog پر می‌شود (Recv-Q روی ۱۲۸) → کانکشن drop و timeout گاه‌به‌گاه. حداقل ۴ نخ این را حل می‌کند. (فلگ `--nb-worker-threads` آپ‌استریم بی‌اثر است؛ env var کنترل واقعی است.) |
 | `RestartSec` | ۵ ثانیه | بازیابی سریع پس از crash |
 
 **کرنل (سرور ایران — هنگام نصب خودکار اعمال می‌شود)**

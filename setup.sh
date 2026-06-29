@@ -598,6 +598,11 @@ build_client_exec() {
 write_client_service() {
     local exec_full
     exec_full=$(build_client_exec)
+    # I/O-bound like the server: on a single-core VPS one tokio worker must serve
+    # every tunneled connection at once. Force >= 4 worker threads so a busy client
+    # (many users) doesn't bottleneck on a single thread. (TOKIO_WORKER_THREADS env
+    # var — the --nb-worker-threads flag is a no-op upstream.)
+    local _wt; _wt=$(nproc 2>/dev/null || echo 1); [ "$_wt" -lt 4 ] && _wt=4
     info "Writing /etc/systemd/system/wstunnel-client.service ..."
     # یک drop-in override کهنه (از اجرا/دیباگ قبلی) روی ExecStart ما سایه می‌اندازد
     # و باعث می‌شود prefix قدیمی اجرا شود — قبل از نوشتن، آن را پاک کن.
@@ -617,6 +622,7 @@ Type=simple
 User=wstunnel
 Group=wstunnel
 WorkingDirectory=/home/wstunnel
+Environment=TOKIO_WORKER_THREADS=${_wt}
 ExecStart=${exec_full}
 Restart=always
 RestartSec=5
@@ -642,6 +648,15 @@ write_server_service() {
     # Path restriction is handled by Caddy, not wstunnel — --restrict-http-upgrade-path-prefix
     # breaks ReverseTcp connections in wstunnel v10, so path routing lives in the Caddyfile.
 
+    # wstunnel is purely I/O-bound. With tokio's default (1 worker thread per CPU),
+    # a single-core VPS runs ONE worker that must both shuffle data for every active
+    # connection AND run the reverse-listener accept() loop. Under load the accept
+    # loop gets starved, the listen backlog fills (Recv-Q pinned at 128) and new user
+    # connections are dropped -> intermittent timeouts, even while CPU looks idle.
+    # Forcing >= 4 worker threads lets accept() run promptly. The flag --nb-worker-threads
+    # is a no-op upstream; the TOKIO_WORKER_THREADS env var is the real control.
+    local _wt; _wt=$(nproc 2>/dev/null || echo 1); [ "$_wt" -lt 4 ] && _wt=4
+
     info "Writing /etc/systemd/system/wstunnel-server.service ..."
     # drop-in override کهنه را پاک کن تا ExecStart ما واقعاً اعمال شود.
     if [ -d /etc/systemd/system/wstunnel-server.service.d ]; then
@@ -659,6 +674,7 @@ Type=simple
 User=wstunnel
 Group=wstunnel
 WorkingDirectory=/home/wstunnel
+Environment=TOKIO_WORKER_THREADS=${_wt}
 ExecStart=/usr/local/bin/wstunnel server ${exec_flags} ws://${PARSED_BIND_IP}:${PARSED_BIND_PORT}
 Restart=always
 RestartSec=5
