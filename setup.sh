@@ -10,7 +10,7 @@ WS_BIN="/usr/local/bin/ws-v2"
 # Safe upper bound for --connection-min-idle. Higher values make the wstunnel
 # client open many sockets at once on (re)connect, which cancels the control
 # tunnel and breaks the reverse tunnel (confirmed: 50 → 100% handshake failure).
-WS_MIN_IDLE_MAX=10
+WS_MIN_IDLE_MAX=20
 
 # ─────────────────────────────────────────────
 # Colors
