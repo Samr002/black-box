@@ -1403,7 +1403,7 @@ tune_kernel_for_client() {
 flow_server() {
     echo ""
     echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
-    ask WSTUNNEL_VERSION "wstunnel version to install" "10.5.5"
+    ask WSTUNNEL_VERSION "wstunnel version to install" "10.6.1"
     ask PARSED_BIND_IP   "Bind IP (keep 127.0.0.1 so only Caddy can reach it)" "127.0.0.1"
     ask PARSED_BIND_PORT "Port wstunnel server listens on" "2018"
 
@@ -1566,7 +1566,7 @@ flow_server() {
 flow_client() {
     echo ""
     echo -e "${BOLD}─── wstunnel ──────────────────────────────────────────${RESET}"
-    ask WSTUNNEL_VERSION "wstunnel version to install" "10.5.5"
+    ask WSTUNNEL_VERSION "wstunnel version to install" "10.6.1"
 
     echo ""
     echo -e "${BOLD}─── Iran VPS connection ───────────────────────────────${RESET}"
@@ -2335,12 +2335,12 @@ flow_update() {
     echo ""
     echo -e "${BOLD}─── Select what to update ─────────────────────────────${RESET}"
 
-    local do_wstunnel=false NEW_VERSION="10.5.5"
+    local do_wstunnel=false NEW_VERSION="10.6.1"
     echo ""
     echo -e "  ${BOLD}wstunnel${RESET}  (current: $([ -n "$wbin" ] && "$wbin" --version 2>&1 | head -n1 || echo 'not installed'))"
     if confirm "  Update wstunnel?"; then
         do_wstunnel=true
-        ask NEW_VERSION "  Target version" "10.5.5"
+        ask NEW_VERSION "  Target version" "10.6.1"
     fi
 
     local do_caddy=false

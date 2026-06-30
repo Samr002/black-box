@@ -35,8 +35,8 @@ Replace `<IRAN_VPS_IP>` with your Iran VPS public IP address. Wait for DNS propa
 
 ```bash
 cd /tmp
-wget https://github.com/erebe/wstunnel/releases/download/v10.5.5/wstunnel_10.5.5_linux_amd64.tar.gz
-tar xzf wstunnel_10.5.5_linux_amd64.tar.gz
+wget https://github.com/erebe/wstunnel/releases/download/v10.6.1/wstunnel_10.6.1_linux_amd64.tar.gz
+tar xzf wstunnel_10.6.1_linux_amd64.tar.gz
 sudo mv wstunnel /usr/local/bin/
 sudo chmod +x /usr/local/bin/wstunnel
 wstunnel --version
