@@ -8,9 +8,11 @@ set -euo pipefail
 SCRIPT_URL="https://raw.githubusercontent.com/Samr002/black-box/black-box-v2/setup.sh"
 WS_BIN="/usr/local/bin/ws-v2"
 # Safe upper bound for --connection-min-idle. Higher values make the wstunnel
-# client open many sockets at once on (re)connect, which cancels the control
-# tunnel and breaks the reverse tunnel (confirmed: 50 → 100% handshake failure).
-WS_MIN_IDLE_MAX=20
+# client open many idle sockets at once, which breaks the reverse-tunnel WS
+# handshake (observed live: 14 and 50 → 100% "connection closed before message
+# completed", listener never registers; 1-8 healthy with queue draining to 0).
+# See upstream #358. Default is 4.
+WS_MIN_IDLE_MAX=8
 
 # ─────────────────────────────────────────────
 # Colors
@@ -54,7 +56,7 @@ PARSED_BIND_IP=""
 PARSED_BIND_PORT=""
 declare -a PARSED_DOMAINS=()
 PARSED_UPGRADE_PATH=""
-PARSED_MIN_IDLE="5"
+PARSED_MIN_IDLE="4"
 
 # ─────────────────────────────────────────────
 # Input helpers
@@ -446,7 +448,7 @@ setup_user() {
 # ─────────────────────────────────────────────
 parse_client_service() {
     local svc_file="/etc/systemd/system/wstunnel-client.service"
-    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH="" PARSED_MIN_IDLE="5"
+    PARSED_DOMAIN="" PARSED_WSS_PORT="443" PARSED_FLAGS=() PARSED_UPGRADE_PATH="" PARSED_MIN_IDLE="4"
     if [ ! -f "$svc_file" ]; then
         warn "Client service file not found — some values will be empty"
         return
@@ -539,7 +541,7 @@ show_client_state() {
     else
         echo -e "  ${BOLD}Upgrade path    :${RESET}  ${YELLOW}(none — obfuscation disabled)${RESET}"
     fi
-    echo -e "  ${BOLD}Idle pool size  :${RESET}  ${YELLOW}${PARSED_MIN_IDLE:-5}${RESET}  ${CYAN}(--connection-min-idle)${RESET}"
+    echo -e "  ${BOLD}Idle pool size  :${RESET}  ${YELLOW}${PARSED_MIN_IDLE:-4}${RESET}  ${CYAN}(--connection-min-idle)${RESET}"
     echo ""
     echo -e "  ${BOLD}Port mappings:${RESET}"
     if [ ${#PARSED_FLAGS[@]} -eq 0 ]; then
@@ -578,7 +580,7 @@ show_server_state() {
 build_client_exec() {
     local result="/usr/local/bin/wstunnel client"
     result+=" --websocket-ping-frequency-sec 30"
-    result+=" --connection-min-idle ${PARSED_MIN_IDLE:-5}"
+    result+=" --connection-min-idle ${PARSED_MIN_IDLE:-4}"
     result+=" --dns-resolver dns://1.1.1.1"
     result+=" --http-headers \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\""
     result+=" --http-headers \"Origin: https://${PARSED_DOMAIN}\""
@@ -1599,13 +1601,14 @@ flow_client() {
     echo -e "  ${YELLOW}Number of idle tunnels kept pre-warmed for instant new connections.${RESET}"
     echo -e "  ${RED}⚠  Keep this LOW. High values make the client open many sockets at${RESET}"
     echo -e "  ${RED}   once on (re)connect, which cancels the control tunnel and breaks${RESET}"
-    echo -e "  ${RED}   the reverse tunnel entirely. ${BOLD}5 is recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
+    echo -e "  ${RED}   the reverse tunnel entirely (observed live: 14 → 100% handshake${RESET}"
+    echo -e "  ${RED}   failure; 1-8 healthy). ${BOLD}4 is recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
     while true; do
-        ask PARSED_MIN_IDLE "Idle connection pool size (--connection-min-idle)" "5"
+        ask PARSED_MIN_IDLE "Idle connection pool size (--connection-min-idle)" "4"
         if [[ "$PARSED_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$PARSED_MIN_IDLE" -ge 1 ] && [ "$PARSED_MIN_IDLE" -le "$WS_MIN_IDLE_MAX" ]; then
             break
         fi
-        warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (5 recommended)."
+        warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (4 recommended)."
     done
 
     echo ""
@@ -2128,19 +2131,19 @@ edit_client() {
                 ;;
             6)
                 echo ""
-                echo -e "  ${YELLOW}Current pool size: ${PARSED_MIN_IDLE:-5}${RESET}"
+                echo -e "  ${YELLOW}Current pool size: ${PARSED_MIN_IDLE:-4}${RESET}"
                 echo -e "  ${RED}⚠  Keep LOW. High values break the reverse tunnel on reconnect${RESET}"
-                echo -e "  ${RED}   (thundering herd cancels the control tunnel). 5 recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
+                echo -e "  ${RED}   (thundering herd breaks the WS handshake). 4 recommended; max ${WS_MIN_IDLE_MAX}.${RESET}"
                 echo ""
                 local NEW_MIN_IDLE
                 while true; do
-                    ask NEW_MIN_IDLE "New idle connection pool size" "${PARSED_MIN_IDLE:-5}"
+                    ask NEW_MIN_IDLE "New idle connection pool size" "${PARSED_MIN_IDLE:-4}"
                     if [[ "$NEW_MIN_IDLE" =~ ^[0-9]+$ ]] && [ "$NEW_MIN_IDLE" -ge 1 ] && [ "$NEW_MIN_IDLE" -le "$WS_MIN_IDLE_MAX" ]; then
                         break
                     fi
-                    warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (5 recommended)."
+                    warn "Enter a whole number between 1 and ${WS_MIN_IDLE_MAX} (4 recommended)."
                 done
-                if [ "$NEW_MIN_IDLE" != "${PARSED_MIN_IDLE:-5}" ]; then
+                if [ "$NEW_MIN_IDLE" != "${PARSED_MIN_IDLE:-4}" ]; then
                     PARSED_MIN_IDLE="$NEW_MIN_IDLE"
                     changed=true; success "Idle pool size set to ${PARSED_MIN_IDLE}."
                 else
